@@ -10,7 +10,7 @@ import "@nomicfoundation/hardhat-toolbox";
 import "@nomicfoundation/hardhat-ignition";
 import "@nomicfoundation/hardhat-chai-matchers";
 import "@nomicfoundation/hardhat-ignition-ethers";
-
+import 'hardhat-contract-sizer';
 
 dotenv.config();
 
@@ -23,11 +23,15 @@ const config: HardhatUserConfig = {
         runs: 200
       },
       viaIR: true
-    }, 
+    },
   },
   networks: {
     hardhat: {
       chainId: 1337,
+      // forking: {
+      //   url: process.env.MAINNET_RPC_URL || "https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID",
+      //   blockNumber: process.env.FORK_BLOCK_NUMBER ? parseInt(process.env.FORK_BLOCK_NUMBER) : undefined,
+      // },
     },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL,
@@ -39,6 +43,18 @@ const config: HardhatUserConfig = {
       },
       gasPrice: 2000000000,
       gasMultiplier: 1.5,
+    },
+    mainnet: {
+      url: process.env.MAINNET_RPC_URL || "https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 1,
+      gasPrice: 30000000000, // 30 gwei
+      gasMultiplier: 1.2,
+      verify: {
+        etherscan: {
+          apiKey: process.env.ETHERSCAN_API_KEY,
+        },
+      },
     },
     ecm: {
       url: "https://rpc.testnet.ecmscan.io",
@@ -63,6 +79,14 @@ const config: HardhatUserConfig = {
         }
       }
     ]
+  },
+
+  contractSizer: {
+    alphaSort: true,
+    disambiguatePaths: false,
+    runOnCompile: true,
+    strict: true,
+    only: ['PoolManager'],
   },
 
   ignition: {

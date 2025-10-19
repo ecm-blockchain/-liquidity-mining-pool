@@ -217,8 +217,6 @@ contract VestingManager is Ownable, ReentrancyGuard {
         
         userVestingIds[beneficiary].push(vestingId);
         totalVestedAmount[token] += amount;
-
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         
         emit VestingCreated(vestingId, beneficiary, token, amount, start, duration);
         
@@ -261,11 +259,6 @@ contract VestingManager is Ownable, ReentrancyGuard {
         
         userVestingIds[beneficiary].push(vestingId);
         totalVestedAmount[token] += amount;
-        
-        // Notify PoolManager if configured
-        if (poolId > 0 && address(poolManager) != address(0)) {
-            poolManager.recordVesting(poolId, beneficiary, amount, vestingId);
-        }
         
         emit VestingCreated(vestingId, beneficiary, token, amount, start, duration);
         

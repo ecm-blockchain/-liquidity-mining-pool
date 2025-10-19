@@ -8,23 +8,35 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IUniswapV2Pair {
-    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
     function token0() external view returns (address);
     function token1() external view returns (address);
     function price0CumulativeLast() external view returns (uint256);
     function price1CumulativeLast() external view returns (uint256);
+    function getReserves()
+        external
+        view
+        returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
 }
 
-
 interface IUniswapV2Factory {
-    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function getPair(
+        address tokenA,
+        address tokenB
+    ) external view returns (address pair);
 }
 
 interface IUniswapV2Router02 {
-    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
-    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    function getAmountOut(
+        uint amountIn,
+        uint reserveIn,
+        uint reserveOut
+    ) external pure returns (uint amountOut);
+    function getAmountIn(
+        uint amountOut,
+        uint reserveIn,
+        uint reserveOut
+    ) external pure returns (uint amountIn);
 }
-
 
 interface IVestingManager {
     function createVesting(
@@ -46,37 +58,42 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // CONSTANTS
     // ============================================
-    
+
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_PURCHASE_ECM = 500 ether; // 500 ECM minimum
     uint256 public constant PURCHASE_MULTIPLE = 500 ether; // Must be multiple of 500
     uint256 public constant DEFAULT_PENALTY_BPS = 2500; // 25% slash
     uint256 public constant MAX_BPS = 10000;
 
+    uint256 public constant WEEK_SECONDS = 7 * 24 * 3600; // 7 days
+    uint256 public constant weeksInYear = (365 days) / WEEK_SECONDS; // = 52
+
+
     // ============================================
     // ENUMS & STRUCTS
     // ============================================
-    
+
     /// @notice Reward distribution strategy for a pool
     /// @dev LINEAR: Constant rate per second | MONTHLY: Fixed amounts per month
-    enum RewardStrategy { LINEAR, MONTHLY }
+    enum RewardStrategy {
+        LINEAR,
+        MONTHLY,
+        WEEKLY
+    }
 
     /// @notice Pool configuration and state tracking
     /// @dev Main data structure for managing token sale, staking, and rewards
     struct Pool {
         // Core Pool Identification
-        uint32 id;                         // Unique pool identifier
-        bool active;                       // Whether pool accepts new purchases/stakes
-        
+        uint32 id; // Unique pool identifier
+        bool active; // Whether pool accepts new purchases/stakes
         // Token Configuration
-        IERC20 ecm;                        // ECM token contract address
-        IERC20 usdt;                       // USDT token contract address (payment token)
-        IUniswapV2Pair pair;               // Uniswap V2 ECM/USDT pair for pricing
-        
+        IERC20 ecm; // ECM token contract address
+        IERC20 usdt; // USDT token contract address (payment token)
+        IUniswapV2Pair pair; // Uniswap V2 ECM/USDT pair for pricing
         // Penalty Configuration
-        uint16 penaltyBps;                 // Early unstake penalty in basis points (2500 = 25%)
-        address penaltyReceiver;           // Address receiving slashed tokens (treasury/burn)
-        
+        uint16 penaltyBps; // Early unstake penalty in basis points (2500 = 25%)
+        address penaltyReceiver; // Address receiving slashed tokens (treasury/burn)
         // Token Allocation & Sale Tracking
         /// @notice Total ECM allocated for public sale (must be transferred by admin)
         uint256 allocatedForSale;
@@ -84,135 +101,129 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 allocatedForRewards;
         /// @notice Total ECM sold to users (all are also staked)
         uint256 sold;
-        uint256 collectedUSDT;             // Total USDT collected from sales
-        
+        uint256 collectedUSDT; // Total USDT collected from sales
         // Staking State
         /// @notice Total ECM currently staked by all users (equal to 'sold')
         uint256 totalStaked;
-        
         // Reward Distribution (accRewardPerShare Pattern)
-        uint256 accRewardPerShare;         // Accumulated rewards per share, scaled by 1e18
-                                           // Formula: sum(rewardRate * timeDelta / totalStaked)
-                                           // Used to calculate: userReward = (userStake * accRewardPerShare / 1e18) - userRewardDebt
-        uint256 lastRewardTime;            // Last timestamp when accRewardPerShare was updated
-        
+        uint256 accRewardPerShare; // Accumulated rewards per share, scaled by 1e18
+        // Formula: sum(rewardRate * timeDelta / totalStaked)
+        // Used to calculate: userReward = (userStake * accRewardPerShare / 1e18) - userRewardDebt
+        uint256 lastRewardTime; // Last timestamp when accRewardPerShare was updated
         // Reward Strategy Configuration
-        RewardStrategy rewardStrategy;     // LINEAR or MONTHLY reward distribution
-        uint256 rewardRatePerSecond;       // For LINEAR: rewards per second (e.g., 1e18 = 1 ECM/sec)
-        
+        RewardStrategy rewardStrategy; // LINEAR or MONTHLY reward distribution
+        uint256 rewardRatePerSecond; // For LINEAR: rewards per second (e.g., 1e18 = 1 ECM/sec)
         // Staking Duration Rules
-        uint256[] allowedStakeDurations;   // Allowed lock periods (e.g., [30 days, 90 days, 180 days])
-        uint256 maxDuration;              // Maximum allowed staking duration
-        
+        uint256[] allowedStakeDurations; // Allowed lock periods (e.g., [30 days, 90 days, 180 days])
+        uint256 maxDuration; // Maximum allowed staking duration
         // Vesting Configuration
-        uint256 vestingDuration;           // Linear vesting period for rewards (e.g., 180 days)
-        bool vestRewardsByDefault;         // If true, rewards auto-vest; if false, user chooses
-        
+        uint256 vestingDuration; // Linear vesting period for rewards (e.g., 180 days)
+        bool vestRewardsByDefault; // If true, rewards auto-vest; if false, user chooses
         // Monthly Reward Strategy Data
-        uint256[] monthlyRewards;          // For MONTHLY: rewards per month [month1, month2, ...]
-        uint256 monthlyRewardIndex;        // Current month index in monthlyRewards array
-        uint256 monthlyRewardStart;        // Timestamp when monthly rewards started
-        
+        uint256[] monthlyRewards; // For MONTHLY: rewards per month [month1, month2, ...]
+        uint256 monthlyRewardIndex; // Current month index in monthlyRewards array
+        uint256 monthlyRewardStart; // Timestamp when monthly rewards started
+        // Weekly Reward Strategy Data
+        uint256[] weeklyRewards; // For WEEKLY: rewards per week [week1, week2, ...]
+        uint256 weeklyRewardIndex; // Current week index in weeklyRewards array
+        uint256 weeklyRewardStart; // Timestamp when weekly rewards started
         // Liquidity Tracking (Two-Level System)
-        uint256 liquidityPoolOwedECM;       // Net ECM moved to LiquidityManager (in - out)
-        uint256 ecmMovedToLiquidity;       // Total ECM transferred to LiquidityManager contract
-        uint256 usdtMovedToLiquidity;      // Total USDT transferred to LiquidityManager contract
-        uint256 ecmAddedToUniswap;         // ECM actually added to Uniswap pool (via callback)
-        uint256 usdtAddedToUniswap;        // USDT actually added to Uniswap pool (via callback)
-        
+        uint256 liquidityPoolOwedECM; // Net ECM moved to LiquidityManager (in - out)
+        uint256 ecmMovedToLiquidity; // Total ECM transferred to LiquidityManager contract
+        uint256 usdtMovedToLiquidity; // Total USDT transferred to LiquidityManager contract
+        uint256 ecmAddedToUniswap; // ECM actually added to Uniswap pool (via callback)
+        uint256 usdtAddedToUniswap; // USDT actually added to Uniswap pool (via callback)
         // Vesting & Rewards Tracking
-        uint256 ecmVested;                 // Total ECM sent to VestingManager for linear vesting
-        uint256 rewardsPaid;               // Total rewards paid out (immediate + vested)
-        uint256 totalRewardsAccrued;       // Total rewards accrued via accRewardPerShare (for capping)
-        
+        uint256 ecmVested; // Total ECM sent to VestingManager for linear vesting
+        uint256 rewardsPaid; // Total rewards paid out (immediate + vested)
+        uint256 totalRewardsAccrued; // Total rewards accrued via accRewardPerShare (for capping)
         // Historical & Analytics Data (for off-chain calculations)
-        uint256 poolCreatedAt;             // Timestamp when pool was created
-        uint256 totalPenaltiesCollected;   // Total ECM collected from early unstake penalties
-        uint256 peakTotalStaked;           // Highest totalStaked value ever reached (for analytics)
-        uint256 totalUniqueStakers;        // Count of unique addresses that have staked
-        uint256 lifetimeStakeVolume;       // Cumulative ECM staked (including re-stakes)
-        uint256 lifetimeUnstakeVolume;     // Cumulative ECM unstaked
+        uint256 poolCreatedAt; // Timestamp when pool was created
+        uint256 totalPenaltiesCollected; // Total ECM collected from early unstake penalties
+        uint256 peakTotalStaked; // Highest totalStaked value ever reached (for analytics)
+        uint256 totalUniqueStakers; // Count of unique addresses that have staked
+        uint256 lifetimeStakeVolume; // Cumulative ECM staked (including re-stakes)
+        uint256 lifetimeUnstakeVolume; // Cumulative ECM unstaked
     }
 
     /// @notice Per-user staking and reward information
     /// @dev Tracks user's position in a specific pool
     struct UserInfo {
-        uint256 bought;                    // Total ECM purchased by user (historical, currently unused)
-        uint256 staked;                    // Currently staked ECM amount
-        uint256 stakeStart;                // Timestamp when current stake began
-        uint256 stakeDuration;             // Selected lock duration (from allowedStakeDurations)
-        
+        uint256 bought; // Total ECM purchased by user (historical, currently unused)
+        uint256 staked; // Currently staked ECM amount
+        uint256 stakeStart; // Timestamp when current stake began
+        uint256 stakeDuration; // Selected lock duration (from allowedStakeDurations)
         // Reward Calculation (accRewardPerShare Pattern)
-        uint256 rewardDebt;                // Reward debt for accRewardPerShare calculation
-                                           // Formula: rewardDebt = staked * accRewardPerShare / 1e18
-                                           // Purpose: Tracks rewards already accounted for
-                                           // Pending rewards = (staked * accRewardPerShare / 1e18) - rewardDebt
-        uint256 pendingRewards;            // Accumulated unclaimed rewards from previous stakes
-        
+        uint256 rewardDebt; // Reward debt for accRewardPerShare calculation
+        // Formula: rewardDebt = staked * accRewardPerShare / 1e18
+        // Purpose: Tracks rewards already accounted for
+        // Pending rewards = (staked * accRewardPerShare / 1e18) - rewardDebt
+        uint256 pendingRewards; // Accumulated unclaimed rewards from previous stakes
         // Historical & Analytics Data
-        bool hasStaked;                    // True if user has ever staked in this pool (for unique staker count)
-        uint256 totalStaked;               // Lifetime total ECM staked by user
-        uint256 totalUnstaked;             // Lifetime total ECM unstaked by user
-        uint256 totalRewardsClaimed;       // Lifetime total rewards claimed by user
-        uint256 totalPenaltiesPaid;        // Total penalties paid from early unstakes
-        uint256 firstStakeTimestamp;       // Timestamp of user's first stake in pool
-        uint256 lastActionTimestamp;       // Timestamp of user's last action (stake/unstake/claim)
+        bool hasStaked; // True if user has ever staked in this pool (for unique staker count)
+        uint256 totalStaked; // Lifetime total ECM staked by user
+        uint256 totalUnstaked; // Lifetime total ECM unstaked by user
+        uint256 totalRewardsClaimed; // Lifetime total rewards claimed by user
+        uint256 totalPenaltiesPaid; // Total penalties paid from early unstakes
+        uint256 firstStakeTimestamp; // Timestamp of user's first stake in pool
+        uint256 lastActionTimestamp; // Timestamp of user's last action (stake/unstake/claim)
     }
 
     /// @notice Parameters for creating a new pool
     /// @dev Used in createPool() to initialize pool configuration
     struct PoolCreateParams {
-        address ecm;                       // ECM token contract address
-        address usdt;                      // USDT token contract address
-        address pair;                      // Uniswap V2 ECM/USDT pair for price oracle
-        address penaltyReceiver;           // Address to receive slashed tokens from early unstakes
-        RewardStrategy rewardStrategy;     // LINEAR or MONTHLY reward distribution
-        uint256[] allowedStakeDurations;   // Allowed lock periods (e.g., [30d, 90d, 180d])
-        uint256 maxDuration;              // Maximum allowed staking duration
-        uint256 vestingDuration;           // Linear vesting duration for rewards (0 = no vesting)
-        bool vestRewardsByDefault;         // Auto-vest rewards vs user choice
-        uint16 penaltyBps;                 // Early unstake penalty in bps (0 = use DEFAULT_PENALTY_BPS)
+        address ecm; // ECM token contract address
+        address usdt; // USDT token contract address
+        address pair; // Uniswap V2 ECM/USDT pair for price oracle
+        address penaltyReceiver; // Address to receive slashed tokens from early unstakes
+        RewardStrategy rewardStrategy; // LINEAR or MONTHLY reward distribution
+        uint256[] allowedStakeDurations; // Allowed lock periods (e.g., [30d, 90d, 180d])
+        uint256 maxDuration; // Maximum allowed staking duration
+        uint256 vestingDuration; // Linear vesting duration for rewards (0 = no vesting)
+        bool vestRewardsByDefault; // Auto-vest rewards vs user choice
+        uint16 penaltyBps; // Early unstake penalty in bps (0 = use DEFAULT_PENALTY_BPS)
     }
 
     // ============================================
     // STATE VARIABLES
     // ============================================
-    
+
     /// @notice All pools indexed by poolId
     /// @dev poolId is auto-incremented starting from 0
     mapping(uint256 => Pool) public pools;
-    
+
     /// @notice User staking information per pool
     /// @dev userInfo[userAddress][poolId] => UserInfo
     mapping(uint256 => mapping(address => UserInfo)) public userInfo;
-    
+
     /// @notice Total number of pools created
     /// @dev Used as next poolId when creating new pool
     uint256 public poolCount;
-    
+
     /// @notice VestingManager contract for linear token vesting
     /// @dev Optional: if not set, rewards paid immediately
     IVestingManager public vestingManager;
 
     /// @notice Uniswap V2 Router address
-    IUniswapV2Router02 public immutable uniswapRouter = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
-    
+    IUniswapV2Router02 public immutable uniswapRouter =
+        IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
+
     /// @notice Authorized LiquidityManager contracts that can report liquidity additions
     /// @dev Used for callback authorization in recordLiquidityAdded()
     mapping(address => bool) public authorizedLiquidityManagers;
-    
-    
 
     // ============================================
     // EVENTS
     // ============================================
-    
+
     event PoolCreated(
         uint256 indexed poolId,
         address indexed ecm,
         address indexed usdt,
-        address pair
+        address pair,
+        RewardStrategy poolType
     );
+    event WeeklyRewardsSet(uint256 indexed poolId, uint256[] weeklyAmounts);
     event ECMAllocatedForSale(uint256 indexed poolId, uint256 amount);
     event ECMAllocatedForRewards(uint256 indexed poolId, uint256 amount);
     event BoughtAndStaked(
@@ -247,14 +258,29 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 ecmAmount,
         uint256 usdtAmount
     );
-    event LinearRewardRateSet(uint256 indexed poolId, uint256 rewardRatePerSecond);
+    event LinearRewardRateSet(
+        uint256 indexed poolId,
+        uint256 rewardRatePerSecond
+    );
     event MonthlyRewardsSet(uint256 indexed poolId, uint256[] monthlyAmounts);
-    event PenaltyConfigUpdated(uint256 indexed poolId, uint256 penaltyBps, address penaltyReceiver);
-    event VestingConfigUpdated(uint256 indexed poolId, uint256 vestingDuration, bool vestByDefault);
+    event PenaltyConfigUpdated(
+        uint256 indexed poolId,
+        uint256 penaltyBps,
+        address penaltyReceiver
+    );
+    event VestingConfigUpdated(
+        uint256 indexed poolId,
+        uint256 vestingDuration,
+        bool vestByDefault
+    );
+    event RewardsVested(uint256 indexed poolId, address indexed user, uint256 amount, uint256 vestingId, uint256 duration);
     event PoolActiveStatusChanged(uint256 indexed poolId, bool active);
     event VestingManagerSet(address vestingManager);
     event LiquidityReserveSet(uint256 indexed poolId, uint256 amount);
-    event AllowedStakeDurationsUpdated(uint256 indexed poolId, uint256[] durations);
+    event AllowedStakeDurationsUpdated(
+        uint256 indexed poolId,
+        uint256[] durations
+    );
     event LiquidityAddedToUniswap(
         uint256 indexed poolId,
         uint256 ecmAmount,
@@ -267,7 +293,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // ERRORS
     // ============================================
-    
+
     error PoolNotActive();
     error InvalidAddress();
     error InvalidStakeDuration();
@@ -276,98 +302,108 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     error MinPurchaseNotMet();
     error PoolDoesNotExist();
     error NotStaked();
+    error InvalidRewards();
     error InvalidPenaltyBps();
     error InvalidAmount();
     error InvalidStrategy();
+    error EmptyWeeklyRewards();
     error UnsustainableRewardRate();
     error ExceedsAllocatedRewards();
     error InsufficientLiquidityReserve();
     error CannotWithdrawStakedTokens();
+    error ExceedsAllocation();
     error InvalidDuration();
     error NotAuthorizedVestingManager();
     error NotAuthorizedLiquidityManager();
-    error InsufficientRewardsForClaim();
     error InvalidRewardRate();
+    error VestingFailed();
     error InsufficientECMForLiquidityTransfer();
     error InsufficientRewardsForRate();
 
     // ============================================
     // CONSTRUCTOR
     // ============================================
-    
+
     constructor() Ownable(msg.sender) {}
 
     // ============================================
     // ADMIN FUNCTIONS - POOL MANAGEMENT
     // ============================================
-    
+
     /// @notice Creates a new pool for ECM token sale and staking
     /// @param params Pool creation parameters
     /// @return poolId The ID of the newly created pool
-    function createPool(PoolCreateParams calldata params) 
-        external 
-        onlyOwner 
-        returns (uint256 poolId) 
-    {
-        if (params.ecm == address(0) || params.usdt == address(0) || params.pair == address(0)) 
-        revert InvalidAddress();
+    function createPool(
+        PoolCreateParams calldata params
+    ) external onlyOwner returns (uint256 poolId) {
+        if (
+            params.ecm == address(0) ||
+            params.usdt == address(0) ||
+            params.pair == address(0)
+        ) revert InvalidAddress();
         if (params.penaltyReceiver == address(0)) revert InvalidAddress();
         if (params.penaltyBps > MAX_BPS) revert InvalidPenaltyBps();
         if (params.allowedStakeDurations.length == 0) revert InvalidDuration();
         if (params.maxDuration == 0) revert InvalidDuration();
-        
+        for (uint256 i = 0; i < params.allowedStakeDurations.length; i++) {
+            uint256 d = params.allowedStakeDurations[i];
+            if (d > params.maxDuration) revert InvalidDuration();
+        }
+
         poolId = poolCount++;
-        
+
         Pool storage pool = pools[poolId];
         pool.id = uint32(poolId);
         pool.active = true;
         pool.ecm = IERC20(params.ecm);
         pool.usdt = IERC20(params.usdt);
         pool.pair = IUniswapV2Pair(params.pair);
-        pool.penaltyBps = params.penaltyBps > 0 ? params.penaltyBps : uint16(DEFAULT_PENALTY_BPS);
+        pool.penaltyBps = params.penaltyBps > 0
+            ? params.penaltyBps
+            : uint16(DEFAULT_PENALTY_BPS);
         pool.penaltyReceiver = params.penaltyReceiver;
         pool.rewardStrategy = params.rewardStrategy;
-        pool.allowedStakeDurations = params.allowedStakeDurations;,
+        pool.allowedStakeDurations = params.allowedStakeDurations;
         pool.maxDuration = params.maxDuration;
         pool.vestingDuration = params.vestingDuration;
         pool.vestRewardsByDefault = params.vestRewardsByDefault;
         pool.lastRewardTime = block.timestamp;
         pool.poolCreatedAt = block.timestamp; // Initialize creation timestamp
-        
-        emit PoolCreated(poolId, params.ecm, params.usdt, params.pair);
+
+    emit PoolCreated(poolId, params.ecm, params.usdt, params.pair, params.rewardStrategy);
     }
 
     /// @notice Allocates ECM tokens for sale (pulled from admin)
     /// @param poolId The pool ID
     /// @param amount Amount of ECM to allocate
-    function allocateForSale(uint256 poolId, uint256 amount) 
-        external 
-        onlyOwner 
-    {
+    function allocateForSale(
+        uint256 poolId,
+        uint256 amount
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (amount == 0) revert InvalidAmount();
-        
+
         Pool storage pool = pools[poolId];
         pool.ecm.safeTransferFrom(msg.sender, address(this), amount);
         pool.allocatedForSale += amount;
-        
+
         emit ECMAllocatedForSale(poolId, amount);
     }
 
     /// @notice Allocates ECM tokens for rewards (pulled from admin)
     /// @param poolId The pool ID
     /// @param amount Amount of ECM to allocate
-    function allocateForRewards(uint256 poolId, uint256 amount) 
-        external 
-        onlyOwner 
-    {
+    function allocateForRewards(
+        uint256 poolId,
+        uint256 amount
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (amount == 0) revert InvalidAmount();
-        
+
         Pool storage pool = pools[poolId];
         pool.ecm.safeTransferFrom(msg.sender, address(this), amount);
         pool.allocatedForRewards += amount;
-        
+
         emit ECMAllocatedForRewards(poolId, amount);
     }
 
@@ -376,77 +412,105 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // ADMIN FUNCTIONS - REWARD CONFIGURATION
     // ============================================
-    
+
     /// @notice Configures LINEAR reward strategy
     /// @param poolId The pool ID
-    function setLinearRewardRate(uint256 poolId) 
-        external 
-        onlyOwner 
-    {
+    function setLinearRewardRate(uint256 poolId) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        if (pool.rewardStrategy != RewardStrategy.LINEAR) revert InvalidStrategy();
+        if (pool.rewardStrategy != RewardStrategy.LINEAR)
+            revert InvalidStrategy();
         if (pool.maxDuration == 0) revert InvalidDuration();
 
         _updatePoolRewards(poolId);
-                
-        
+
         // Validate that reward rate doesn't exceed available rewards
         // This is a sanity check to prevent misconfiguration
-        uint256 remainingRewards = pool.allocatedForRewards - pool.totalRewardsAccrued;
+        uint256 remainingRewards = pool.allocatedForRewards -
+            pool.totalRewardsAccrued;
         if (remainingRewards == 0) revert InsufficientRewardsForRate();
 
         uint256 rewardRatePerSecond = remainingRewards / pool.maxDuration;
         if (rewardRatePerSecond == 0) revert InvalidRewardRate();
         pool.rewardRatePerSecond = rewardRatePerSecond;
-        
+
         emit LinearRewardRateSet(poolId, rewardRatePerSecond);
     }
 
     /// @notice Configures MONTHLY reward strategy
     /// @param poolId The pool ID
     /// @param monthlyAmounts Array of monthly reward amounts
-    function setMonthlyRewards(uint256 poolId, uint256[] calldata monthlyAmounts) 
-        external 
-        onlyOwner 
-    {
+    function setMonthlyRewards(
+        uint256 poolId,
+        uint256[] calldata monthlyAmounts
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        if (pool.rewardStrategy != RewardStrategy.MONTHLY) revert InvalidStrategy();
-        
+        if (pool.rewardStrategy != RewardStrategy.MONTHLY)
+            revert InvalidStrategy();
+
         _updatePoolRewards(poolId);
-        
+
         // Verify total rewards don't exceed allocated
         uint256 totalMonthly = 0;
         for (uint256 i = 0; i < monthlyAmounts.length; i++) {
             totalMonthly += monthlyAmounts[i];
         }
-        
-        if (totalMonthly > pool.allocatedForRewards) revert ExceedsAllocatedRewards();
-        
+
+        if (totalMonthly > pool.allocatedForRewards)
+            revert ExceedsAllocatedRewards();
+
         pool.monthlyRewards = monthlyAmounts;
         pool.monthlyRewardIndex = 0;
         pool.monthlyRewardStart = block.timestamp;
-        
+
         emit MonthlyRewardsSet(poolId, monthlyAmounts);
+    }
+
+    /// @notice Configures WEEKLY reward strategy
+    /// @param poolId The pool ID
+    /// @param weeklyAmounts Array of weekly reward amounts
+    function setWeeklyRewards(
+        uint256 poolId,
+        uint256[] calldata weeklyAmounts
+    ) external onlyOwner {
+        if (poolId >= poolCount) revert PoolDoesNotExist();
+        if (weeklyAmounts.length == 0) revert EmptyWeeklyRewards();
+        Pool storage pool = pools[poolId];
+        if (pool.rewardStrategy != RewardStrategy.WEEKLY) revert InvalidStrategy();
+        _updatePoolRewards(poolId); // Update accrued rewards before changes
+
+        // Validate total rewards don't exceed allocated
+        uint256 totalWeekly = 0;
+        for (uint256 i = 0; i < weeklyAmounts.length; i++) {
+            totalWeekly += weeklyAmounts[i];
+        }
+        if (totalWeekly > pool.allocatedForRewards) revert ExceedsAllocation();
+
+        // Reset and set new weekly rewards
+        delete pool.weeklyRewards;
+        pool.weeklyRewards = weeklyAmounts;
+        pool.weeklyRewardIndex = 0;
+        pool.weeklyRewardStart = block.timestamp; // Reset weekly start time
+        emit WeeklyRewardsSet(poolId, weeklyAmounts);
     }
 
     // ============================================
     // ADMIN FUNCTIONS - POOL CONFIGURATION
     // ============================================
-    
+
     /// @notice Updates allowed stake durations
     /// @param poolId The pool ID
     /// @param durations Array of allowed durations in seconds
-    function setAllowedStakeDurations(uint256 poolId, uint256[] calldata durations) 
-        external 
-        onlyOwner 
-    {
+    function setAllowedStakeDurations(
+        uint256 poolId,
+        uint256[] calldata durations
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (durations.length == 0) revert InvalidDuration();
-        
+
         pools[poolId].allowedStakeDurations = durations;
         emit AllowedStakeDurationsUpdated(poolId, durations);
     }
@@ -455,17 +519,18 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param penaltyBps Penalty in basis points (2500 = 25%)
     /// @param penaltyReceiver Address to receive slashed tokens
-    function setPenaltyConfig(uint256 poolId, uint16 penaltyBps, address penaltyReceiver) 
-        external 
-        onlyOwner 
-    {
+    function setPenaltyConfig(
+        uint256 poolId,
+        uint16 penaltyBps,
+        address penaltyReceiver
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (penaltyBps > MAX_BPS) revert InvalidPenaltyBps();
-        
+
         Pool storage pool = pools[poolId];
         pool.penaltyBps = penaltyBps;
         pool.penaltyReceiver = penaltyReceiver;
-        
+
         emit PenaltyConfigUpdated(poolId, penaltyBps, penaltyReceiver);
     }
 
@@ -473,54 +538,44 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param vestingDuration Duration of vesting in seconds
     /// @param vestByDefault Whether rewards vest by default
-    function setVestingConfig(uint256 poolId, uint256 vestingDuration, bool vestByDefault) 
-        external 
-        onlyOwner 
-    {
+    function setVestingConfig(
+        uint256 poolId,
+        uint256 vestingDuration,
+        bool vestByDefault
+    ) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         pool.vestingDuration = vestingDuration;
         pool.vestRewardsByDefault = vestByDefault;
-        
+
         emit VestingConfigUpdated(poolId, vestingDuration, vestByDefault);
     }
 
     /// @notice Activates or deactivates a pool
     /// @param poolId The pool ID
     /// @param active Whether the pool should be active
-    function setPoolActive(uint256 poolId, bool active) 
-        external 
-        onlyOwner 
-    {
+    function setPoolActive(uint256 poolId, bool active) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         pools[poolId].active = active;
         emit PoolActiveStatusChanged(poolId, active);
     }
 
     /// @notice Sets the VestingManager contract address
     /// @param _vestingManager Address of the VestingManager contract
-    function setVestingManager(address _vestingManager) 
-        external 
-        onlyOwner 
-    {
+    function setVestingManager(address _vestingManager) external onlyOwner {
         vestingManager = IVestingManager(_vestingManager);
         emit VestingManagerSet(_vestingManager);
     }
-
 
     // ============================================
     // ADMIN FUNCTIONS - AUTHORIZATION MANAGEMENT
     // ============================================
 
-
     /// @notice Authorizes a LiquidityManager contract to record liquidity additions
     /// @param manager Address to authorize
-    function addAuthorizedLiquidityManager(address manager) 
-        external 
-        onlyOwner 
-    {
+    function addAuthorizedLiquidityManager(address manager) external onlyOwner {
         if (manager == address(0)) revert InvalidAddress();
         authorizedLiquidityManagers[manager] = true;
         emit LiquidityManagerAuthorized(manager);
@@ -528,10 +583,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Removes authorization from a LiquidityManager contract
     /// @param manager Address to deauthorize
-    function removeAuthorizedLiquidityManager(address manager) 
-        external 
-        onlyOwner 
-    {
+    function removeAuthorizedLiquidityManager(
+        address manager
+    ) external onlyOwner {
         authorizedLiquidityManagers[manager] = false;
         emit LiquidityManagerDeauthorized(manager);
     }
@@ -539,7 +593,6 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // CROSS-CONTRACT HOOKS
     // ============================================
-  
 
     /// @notice Records liquidity added to Uniswap (callback from LiquidityManager)
     /// @param poolId The pool ID
@@ -550,20 +603,21 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 ecmAmount,
         uint256 usdtAmount
     ) external {
-        if (!authorizedLiquidityManagers[msg.sender]) revert NotAuthorizedLiquidityManager();
+        if (!authorizedLiquidityManagers[msg.sender])
+            revert NotAuthorizedLiquidityManager();
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         pool.ecmAddedToUniswap += ecmAmount;
         pool.usdtAddedToUniswap += usdtAmount;
-        
+
         emit LiquidityAddedToUniswap(poolId, ecmAmount, usdtAmount);
     }
 
     // ============================================
     // ADMIN FUNCTIONS - LIQUIDITY & EMERGENCYInvalidAmount
     // ============================================
-    
+
     /// @notice Transfers tokens to LiquidityManager
     /// @param poolId The pool ID
     /// @param liquidityManager Address of the LiquidityManager
@@ -578,9 +632,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         Pool storage pool = pools[poolId];
 
-
         // Admin can only transfer ECM up to the total staked amount, but do not subtract from totalStaked
-        if (ecmAmount > pool.totalStaked - pool.liquidityPoolOwedECM) revert InsufficientECMForLiquidityTransfer();
+        if (ecmAmount > pool.totalStaked - pool.liquidityPoolOwedECM)
+            revert InsufficientECMForLiquidityTransfer();
         pool.ecmMovedToLiquidity += ecmAmount;
         pool.liquidityPoolOwedECM += ecmAmount;
         pool.ecm.safeTransfer(liquidityManager, ecmAmount);
@@ -593,16 +647,27 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             pool.usdt.safeTransfer(liquidityManager, usdtAmount);
         }
 
-        emit LiquidityTransferToManager(poolId, liquidityManager, ecmAmount, usdtAmount);
+        emit LiquidityTransferToManager(
+            poolId,
+            liquidityManager,
+            ecmAmount,
+            usdtAmount
+        );
     }
 
-        // In LiquidityManager contract
-    function refillPoolManager(uint256 poolId, uint256 ecmAmount) external onlyOwner {
+    // Called by an authorized LiquidityManager to return ECM that was not added to Uniswap
+    function refillPoolManager(uint256 poolId, uint256 ecmAmount) external {
+        if (!authorizedLiquidityManagers[msg.sender])
+            revert NotAuthorizedLiquidityManager();
         if (poolId >= poolCount) revert PoolDoesNotExist();
         Pool storage pool = pools[poolId];
-        if(ecmAmount > pool.liquidityPoolOwedECM) revert ();
+
+        if (ecmAmount == 0) revert InvalidAmount();
+        if (ecmAmount > pool.liquidityPoolOwedECM) revert InvalidAmount();
+
         pool.liquidityPoolOwedECM -= ecmAmount;
         pool.ecm.safeTransferFrom(msg.sender, address(this), ecmAmount);
+
         emit OwedLiquidityRefilled(poolId, ecmAmount);
     }
 
@@ -610,10 +675,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param token Token address
     /// @param amount Amount to withdraw
     /// @param to Recipient address
-    function emergencyRecoverTokens(address token, uint256 amount, address to) 
-        external 
-        onlyOwner 
-    {
+    function emergencyRecoverTokens(
+        address token,
+        uint256 amount,
+        address to
+    ) external onlyOwner {
         // Add checks to prevent withdrawing user-staked tokens
         // This is a simplified version - production should have more robust checks
         IERC20(token).safeTransfer(to, amount);
@@ -632,7 +698,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // USER FUNCTIONS - BUY & STAKE
     // ============================================
-    
+
     /// @notice Buy ECM with USDT and auto-stake in a single transaction
     /// @param poolId The pool ID
     /// @param maxUsdtAmount Maximum USDT willing to spend
@@ -644,74 +710,84 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     ) external nonReentrant whenNotPaused {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (maxUsdtAmount == 0) revert InvalidAmount();
-        
+
         Pool storage pool = pools[poolId];
         if (!pool.active) revert PoolNotActive();
-        if (!_isAllowedDuration(poolId, selectedStakeDuration)) revert InvalidStakeDuration();
-        
+        if (!_isAllowedDuration(poolId, selectedStakeDuration))
+            revert InvalidStakeDuration();
+
         // Update pool rewards
         _updatePoolRewards(poolId);
-        
+
         // Get price and calculate ECM amount
         uint256 ecmRaw = _getECMAmountOut(poolId, maxUsdtAmount);
-        
+
         // Floor to 500 ECM multiple
-        uint256 ecmToAllocate = (ecmRaw / PURCHASE_MULTIPLE) * PURCHASE_MULTIPLE;
+        uint256 ecmToAllocate = (ecmRaw / PURCHASE_MULTIPLE) *
+            PURCHASE_MULTIPLE;
         if (ecmToAllocate < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
-        
+
         // Check pool inventory
-        if (ecmToAllocate > pool.allocatedForSale - pool.sold) revert InsufficientPoolECM();
-        
+        if (ecmToAllocate > pool.allocatedForSale - pool.sold)
+            revert InsufficientPoolECM();
+
         // Calculate exact USDT required
         uint256 usdtRequired = _getUSDTAmountIn(poolId, ecmToAllocate);
-        
+
         // Slippage check
         if (usdtRequired > maxUsdtAmount) revert SlippageExceeded();
-        
+
         // Transfer USDT from user
         pool.usdt.safeTransferFrom(msg.sender, address(this), usdtRequired);
-        
+
         // Update pool accounting
         pool.sold += ecmToAllocate;
         pool.collectedUSDT += usdtRequired;
-        
+
         // Update user info and auto-stake
         UserInfo storage user = userInfo[poolId][msg.sender];
-        
+
         // Track unique stakers
         if (!user.hasStaked) {
             user.hasStaked = true;
             user.firstStakeTimestamp = block.timestamp;
             pool.totalUniqueStakers++;
         }
-        
+
         // If user already has stake, accumulate pending rewards
         if (user.staked > 0) {
-            uint256 accumulated = (user.staked * pool.accRewardPerShare) / PRECISION;
+            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
+                PRECISION;
             if (accumulated > user.rewardDebt) {
                 uint256 pending = accumulated - user.rewardDebt;
                 user.pendingRewards += pending;
             }
         }
-        
+
         // Auto-stake
         user.staked += ecmToAllocate;
         user.stakeStart = block.timestamp;
         user.stakeDuration = selectedStakeDuration;
         pool.totalStaked += ecmToAllocate;
-        user.rewardDebt = user.staked * pool.accRewardPerShare / PRECISION;
-        
+        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
+
         // Update historical tracking
         user.totalStaked += ecmToAllocate;
         user.lastActionTimestamp = block.timestamp;
         pool.lifetimeStakeVolume += ecmToAllocate;
-        
+
         // Update peak staked if necessary
         if (pool.totalStaked > pool.peakTotalStaked) {
             pool.peakTotalStaked = pool.totalStaked;
         }
-        
-        emit BoughtAndStaked(poolId, msg.sender, ecmToAllocate, usdtRequired, selectedStakeDuration);
+
+        emit BoughtAndStaked(
+            poolId,
+            msg.sender,
+            ecmToAllocate,
+            usdtRequired,
+            selectedStakeDuration
+        );
     }
 
     /// @notice Buy exact ECM amount and auto-stake
@@ -728,99 +804,109 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (exactEcmAmount == 0) revert InvalidAmount();
         if (exactEcmAmount % PURCHASE_MULTIPLE != 0) revert InvalidAmount();
-        
+
         Pool storage pool = pools[poolId];
         if (!pool.active) revert PoolNotActive();
-        if (!_isAllowedDuration(poolId, selectedStakeDuration)) revert InvalidStakeDuration();
-        
+        if (!_isAllowedDuration(poolId, selectedStakeDuration))
+            revert InvalidStakeDuration();
+
         // Update pool rewards
         _updatePoolRewards(poolId);
-        
+
         // Check pool inventory
-        if (exactEcmAmount > pool.allocatedForSale - pool.sold) revert InsufficientPoolECM();
-        
+        if (exactEcmAmount > pool.allocatedForSale - pool.sold)
+            revert InsufficientPoolECM();
+
         // Calculate exact USDT required
         uint256 usdtRequired = _getUSDTAmountIn(poolId, exactEcmAmount);
-        
+
         // Slippage check
         if (usdtRequired > maxUsdtAmount) revert SlippageExceeded();
-        
+
         // Transfer USDT from user
         pool.usdt.safeTransferFrom(msg.sender, address(this), usdtRequired);
-        
+
         // Update pool accounting
         pool.sold += exactEcmAmount;
         pool.collectedUSDT += usdtRequired;
-        
+
         // Update user info and auto-stake
         UserInfo storage user = userInfo[poolId][msg.sender];
-        
+
         // Track unique stakers
         if (!user.hasStaked) {
             user.hasStaked = true;
             user.firstStakeTimestamp = block.timestamp;
             pool.totalUniqueStakers++;
         }
-        
+
         // If user already has stake, accumulate pending rewards
         if (user.staked > 0) {
-            uint256 accumulated = (user.staked * pool.accRewardPerShare) / PRECISION;
+            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
+                PRECISION;
             if (accumulated > user.rewardDebt) {
                 uint256 pending = accumulated - user.rewardDebt;
                 user.pendingRewards += pending;
             }
         }
-        
+
         // Auto-stake
         user.staked += exactEcmAmount;
         user.stakeStart = block.timestamp;
         user.stakeDuration = selectedStakeDuration;
         pool.totalStaked += exactEcmAmount;
-        user.rewardDebt = user.staked * pool.accRewardPerShare / PRECISION;
-        
+        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
+
         // Update historical tracking
         user.totalStaked += exactEcmAmount;
         user.lastActionTimestamp = block.timestamp;
         pool.lifetimeStakeVolume += exactEcmAmount;
-        
+
         // Update peak staked if necessary
         if (pool.totalStaked > pool.peakTotalStaked) {
             pool.peakTotalStaked = pool.totalStaked;
         }
-        
-        emit BoughtAndStaked(poolId, msg.sender, exactEcmAmount, usdtRequired, selectedStakeDuration);
+
+        emit BoughtAndStaked(
+            poolId,
+            msg.sender,
+            exactEcmAmount,
+            usdtRequired,
+            selectedStakeDuration
+        );
     }
 
     // ============================================
     // USER FUNCTIONS - UNSTAKE & CLAIM
     // ============================================
-    
+
     /// @notice Unstake tokens and claim rewards
     /// @param poolId The pool ID
     function unstake(uint256 poolId) external nonReentrant {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage user = userInfo[poolId][msg.sender];
-        
+
         if (user.staked == 0) revert NotStaked();
-        
+
         // Update pool rewards
         _updatePoolRewards(poolId);
-        
+
         // Calculate pending rewards safely
-        uint256 accumulated = (user.staked * pool.accRewardPerShare) / PRECISION;
+        uint256 accumulated = (user.staked * pool.accRewardPerShare) /
+            PRECISION;
         uint256 pending = user.pendingRewards;
         if (accumulated > user.rewardDebt) {
             pending += accumulated - user.rewardDebt;
         }
-        
+
         // Determine if matured
         bool matured = block.timestamp >= user.stakeStart + user.stakeDuration;
-        
+
         uint256 principalToReturn;
         uint256 slashed = 0;
-        
+
         if (matured) {
             // Full principal returned
             principalToReturn = user.staked;
@@ -829,56 +915,57 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             slashed = (user.staked * pool.penaltyBps) / MAX_BPS;
             principalToReturn = user.staked - slashed;
         }
-        // Check available rewards in pool
-        uint256 availableRewards = pool.allocatedForRewards - pool.rewardsPaid;
-        if (pending > availableRewards) {
-            revert InsufficientRewardsForClaim();
-        }
-        
+        // Do not revert if rewards are depleted — allow principal unstake.
+        // `_claimOrVestRewards` will clip the reward amount to remaining available rewards.
+
         // Update state before transfers
         uint256 stakedAmount = user.staked;
         pool.totalStaked -= user.staked;
         pool.lifetimeUnstakeVolume += principalToReturn; // Track unstake volume
-        
+
         user.staked = 0;
         user.rewardDebt = 0;
         user.pendingRewards = 0;
         user.stakeStart = 0;
         user.stakeDuration = 0;
-        
+
         // Update historical tracking
         user.totalUnstaked += stakedAmount;
         user.lastActionTimestamp = block.timestamp;
-        
+
         if (slashed > 0) {
             user.totalPenaltiesPaid += slashed;
             pool.totalPenaltiesCollected += slashed;
         }
-        
-        if (pending > 0) {
-            user.totalRewardsClaimed += pending;
-        }
-        
+
         // Transfer slashed tokens to penalty receiver
         if (slashed > 0 && pool.penaltyReceiver != address(0)) {
             pool.ecm.safeTransfer(pool.penaltyReceiver, slashed);
         }
-        
+
         // Transfer principal to user
         if (principalToReturn > 0) {
             pool.ecm.safeTransfer(msg.sender, principalToReturn);
         }
-        
-        // Handle rewards
+
+        // Handle rewards (claim or vest). Use actual paid amount returned to avoid overcounting
+        uint256 paid = 0;
         if (pending > 0) {
-            _claimOrVestRewards(poolId, msg.sender, pending);
+            paid = _claimOrVestRewards(poolId, msg.sender, pending);
+            if (paid > 0) user.totalRewardsClaimed += paid;
         }
-        
+
         // Emit appropriate event
         if (slashed > 0) {
-            emit EarlyUnstaked(poolId, msg.sender, principalToReturn, slashed, pending);
+            emit EarlyUnstaked(
+                poolId,
+                msg.sender,
+                principalToReturn,
+                slashed,
+                paid
+            );
         } else {
-            emit Unstaked(poolId, msg.sender, principalToReturn, pending);
+            emit Unstaked(poolId, msg.sender, principalToReturn, paid);
         }
     }
 
@@ -886,56 +973,60 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     function claimRewards(uint256 poolId) external nonReentrant {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage user = userInfo[poolId][msg.sender];
-        
+
         // Update pool rewards
         _updatePoolRewards(poolId);
-        
+
         // Calculate pending rewards safely
-        uint256 accumulated = (user.staked * pool.accRewardPerShare) / PRECISION;
+        uint256 accumulated = (user.staked * pool.accRewardPerShare) /
+            PRECISION;
         uint256 pending = user.pendingRewards;
         if (accumulated > user.rewardDebt) {
             pending += accumulated - user.rewardDebt;
         }
-        
-        if (pending == 0) return;
-        
-        // Update state
-        user.rewardDebt = user.staked * pool.accRewardPerShare / PRECISION;
-        user.pendingRewards = 0;
-        
-        // Update historical tracking
-        user.totalRewardsClaimed += pending;
-        user.lastActionTimestamp = block.timestamp;
-        
-        // Transfer or vest rewards (based on pool configuration)
-        _claimOrVestRewards(poolId, msg.sender, pending);
-    }
 
+        if (pending == 0) return;
+
+        // Update state
+        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
+        user.pendingRewards = 0;
+
+        // Transfer or vest rewards (based on pool configuration)
+        uint256 paid = _claimOrVestRewards(poolId, msg.sender, pending);
+
+        // Update historical tracking with actual paid amount
+        if (paid > 0) {
+            user.totalRewardsClaimed += paid;
+            user.lastActionTimestamp = block.timestamp;
+        }
+    }
 
     // ============================================
     // VIEW FUNCTIONS - PRICES
     // ============================================
-    
+
     /// @notice Gets spot price from Uniswap reserves
     /// @param poolId The pool ID
     /// @return usdtPerEcm Price in USDT per ECM (scaled by PRECISION)
     /// @return reserveECM ECM reserve
     /// @return reserveUSDT USDT reserve
-    function getPriceSpot(uint256 poolId) 
-        public 
-        view 
-        returns (uint256 usdtPerEcm, uint256 reserveECM, uint256 reserveUSDT) 
+    function getPriceSpot(
+        uint256 poolId
+    )
+        public
+        view
+        returns (uint256 usdtPerEcm, uint256 reserveECM, uint256 reserveUSDT)
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        (uint112 reserve0, uint112 reserve1,) = pool.pair.getReserves();
-        
+        (uint112 reserve0, uint112 reserve1, ) = pool.pair.getReserves();
+
         address token0 = pool.pair.token0();
-        
+
         if (token0 == address(pool.ecm)) {
             reserveECM = uint256(reserve0);
             reserveUSDT = uint256(reserve1);
@@ -943,7 +1034,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             reserveECM = uint256(reserve1);
             reserveUSDT = uint256(reserve0);
         }
-        
+
         if (reserveECM > 0) {
             usdtPerEcm = (reserveUSDT * PRECISION) / reserveECM;
         }
@@ -952,15 +1043,13 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // VIEW FUNCTIONS - POOL & USER INFO
     // ============================================
-    
+
     /// @notice Gets pool information
     /// @param poolId The pool ID
     /// @return pool Pool struct
-    function getPoolInfo(uint256 poolId) 
-        external 
-        view 
-        returns (Pool memory pool) 
-    {
+    function getPoolInfo(
+        uint256 poolId
+    ) external view returns (Pool memory pool) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         return pools[poolId];
     }
@@ -969,11 +1058,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param user User address
     /// @return userInformation User struct
-    function getUserInfo(uint256 poolId, address user) 
-        external 
-        view 
-        returns (UserInfo memory userInformation) 
-    {
+    function getUserInfo(
+        uint256 poolId,
+        address user
+    ) external view returns (UserInfo memory userInformation) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         return userInfo[poolId][user];
     }
@@ -982,39 +1070,38 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param user User address
     /// @return pending Pending reward amount
-    function pendingRewards(uint256 poolId, address user) 
-        public 
-        view 
-        returns (uint256 pending) 
-    {
+    function pendingRewards(
+        uint256 poolId,
+        address user
+    ) public view returns (uint256 pending) {
         if (poolId >= poolCount) return 0;
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage userInf = userInfo[poolId][user];
-        
+
         uint256 accRewardPerShare = pool.accRewardPerShare;
-        
+
         // Calculate updated accRewardPerShare
         if (block.timestamp > pool.lastRewardTime && pool.totalStaked > 0) {
             uint256 delta = block.timestamp - pool.lastRewardTime;
             uint256 rewardAccrued = _calculateRewardAccruedView(pool, delta);
             accRewardPerShare += (rewardAccrued * PRECISION) / pool.totalStaked;
         }
-        
-        pending = (userInf.staked * accRewardPerShare / PRECISION) 
-                 - userInf.rewardDebt 
-                 + userInf.pendingRewards;
+
+        pending =
+            ((userInf.staked * accRewardPerShare) / PRECISION) -
+            userInf.rewardDebt +
+            userInf.pendingRewards;
     }
 
     /// @notice Estimates USDT required for exact ECM amount
     /// @param poolId The pool ID
     /// @param exactEcm Exact ECM amount
     /// @return usdtRequired USDT required
-    function getRequiredUSDTForExactECM(uint256 poolId, uint256 exactEcm) 
-        external 
-        view 
-        returns (uint256 usdtRequired) 
-    {
+    function getRequiredUSDTForExactECM(
+        uint256 poolId,
+        uint256 exactEcm
+    ) external view returns (uint256 usdtRequired) {
         return _getUSDTAmountIn(poolId, exactEcm);
     }
 
@@ -1022,11 +1109,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param usdtAmount USDT amount
     /// @return ecmEstimate Estimated ECM amount
-    function estimateECMForUSDT(uint256 poolId, uint256 usdtAmount) 
-        external 
-        view 
-        returns (uint256 ecmEstimate) 
-    {
+    function estimateECMForUSDT(
+        uint256 poolId,
+        uint256 usdtAmount
+    ) external view returns (uint256 ecmEstimate) {
         return _getECMAmountOut(poolId, usdtAmount);
     }
 
@@ -1042,9 +1128,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @return rewardsPaid Total rewards paid out
     /// @return availableInContract ECM available in this contract
     /// @return deficit ECM deficit (if negative balance)
-    function getPoolBalanceStatus(uint256 poolId) 
-        external 
-        view 
+    function getPoolBalanceStatus(
+        uint256 poolId
+    )
+        external
+        view
         returns (
             uint256 totalAllocated,
             uint256 soldToUsers,
@@ -1056,12 +1144,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             uint256 rewardsPaid,
             uint256 availableInContract,
             uint256 deficit
-        ) 
+        )
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
+
         totalAllocated = pool.allocatedForSale + pool.allocatedForRewards;
         soldToUsers = pool.sold;
         currentlyStaked = pool.totalStaked;
@@ -1070,11 +1158,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         addedToUniswap = pool.ecmAddedToUniswap;
         vested = pool.ecmVested;
         rewardsPaid = pool.rewardsPaid;
-        
+
         // Calculate actual balance in contract
         uint256 contractBalance = pool.ecm.balanceOf(address(this));
-        
-        // Correct calculation: 
+
+        // Correct calculation:
         // (Total tokens ever received) - (Tokens no longer in contract)
         // Tokens no longer in contract:
         // - rewardsPaid: rewards paid/vested to users
@@ -1083,9 +1171,13 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // - totalPenaltiesCollected: penalties sent to penaltyReceiver
         // Use the net outstanding liquidity owed (liquidityOwedECM) rather than
         // the cumulative moved amount so that refills are correctly reflected.
-        uint256 shouldHave = (pool.allocatedForSale + pool.allocatedForRewards) 
-           - (pool.rewardsPaid + liquidityOwedECM + pool.lifetimeUnstakeVolume + pool.totalPenaltiesCollected);
-        
+        uint256 shouldHave = (pool.allocatedForSale +
+            pool.allocatedForRewards) -
+            (pool.rewardsPaid +
+                liquidityOwedECM +
+                pool.lifetimeUnstakeVolume +
+                pool.totalPenaltiesCollected);
+
         if (contractBalance >= shouldHave) {
             availableInContract = contractBalance - shouldHave;
             deficit = 0;
@@ -1098,52 +1190,53 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ============================================
     // VIEW FUNCTIONS - ANALYTICS & METRICS
     // ============================================
-    
+
     /// @notice Calculate APR for LINEAR reward strategy
     /// @param poolId The pool ID
     /// @return apr Annual Percentage Rate (scaled by 1e18, so 5% = 5e18)
     /// @dev Returns 0 if totalStaked is 0 or strategy is not LINEAR
-    function calculateAPR(uint256 poolId) 
-        external 
-        view 
-        returns (uint256 apr) 
-    {
+    function calculateAPR(uint256 poolId) external view returns (uint256 apr) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
-        if (pool.rewardStrategy != RewardStrategy.LINEAR || pool.totalStaked == 0) {
+
+        if (
+            pool.rewardStrategy != RewardStrategy.LINEAR ||
+            pool.totalStaked == 0
+        ) {
             return 0;
         }
-        
+
         // APR = (rewardRatePerSecond * SECONDS_PER_YEAR) / totalStaked * 100
         uint256 SECONDS_PER_YEAR = 31557600; // 365.25 days
-        
+
         // Calculate annual rewards: rewardRatePerSecond * SECONDS_PER_YEAR
         uint256 annualRewards = pool.rewardRatePerSecond * SECONDS_PER_YEAR;
-        
+
         // APR = (annualRewards / totalStaked) * 100
         // To maintain precision, we multiply by 1e18 first
         apr = (annualRewards * 100) / pool.totalStaked;
     }
-    
+
     /// @notice Calculate APR for MONTHLY reward strategy
     /// @param poolId The pool ID
     /// @param monthsToProject Number of months to project (default 12 for annual)
     /// @return apr Annual Percentage Rate based on next N months (scaled by 1e18)
-    function calculateMonthlyAPR(uint256 poolId, uint256 monthsToProject) 
-        external 
-        view 
-        returns (uint256 apr) 
-    {
+    function calculateMonthlyAPR(
+        uint256 poolId,
+        uint256 monthsToProject
+    ) external view returns (uint256 apr) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
-        if (pool.rewardStrategy != RewardStrategy.MONTHLY || pool.totalStaked == 0) {
+
+        if (
+            pool.rewardStrategy != RewardStrategy.MONTHLY ||
+            pool.totalStaked == 0
+        ) {
             return 0;
         }
-        
+
         // Sum next N months of rewards
         uint256 projectedRewards = 0;
         for (uint256 i = 0; i < monthsToProject; i++) {
@@ -1152,11 +1245,46 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 projectedRewards += pool.monthlyRewards[monthIndex];
             }
         }
-        
+
         // APR = (projectedRewards / totalStaked) * 100
         apr = (projectedRewards * PRECISION * 100) / pool.totalStaked;
     }
-    
+
+    /// @notice Calculate APR for WEEKLY reward strategy
+    /// @param poolId The pool ID
+    /// @param weeksToProject Number of weeks to project (default 52 for annual)
+    /// @return apr Annual Percentage Rate based on next N weeks (scaled by 1e18)
+    function calculateWeeklyAPR(
+        uint256 poolId,
+        uint256 weeksToProject
+    ) external view returns (uint256 apr) {
+        if (poolId >= poolCount) revert PoolDoesNotExist();
+        Pool storage pool = pools[poolId];
+        if (
+            pool.rewardStrategy != RewardStrategy.WEEKLY ||
+            pool.totalStaked == 0
+        ) {
+            return 0;
+        }
+
+        // Sum next N weeks of rewards
+        uint256 projectedRewards = 0;
+        uint256 weeksProcessed = 0;
+        uint256 currentWeekIndex = pool.weeklyRewardIndex;
+        while (
+            weeksProcessed < weeksToProject &&
+            currentWeekIndex < pool.weeklyRewards.length
+        ) {
+            projectedRewards += pool.weeklyRewards[currentWeekIndex];
+            weeksProcessed++;
+            currentWeekIndex++;
+        }
+
+        // Annualize using weeksToProject (default 52)
+        apr = (projectedRewards * PRECISION * weeksInYear * 100) / weeksToProject; // Scale to annual
+        apr = apr  / pool.totalStaked; // APR = (total rewards / staked) * 100
+    }
+
     /// @notice Calculate expected rewards for a user over a time period
     /// @param poolId The pool ID
     /// @param user User address
@@ -1166,45 +1294,94 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 poolId,
         address user,
         uint256 durationSeconds
-    ) 
-        external 
-        view 
-        returns (uint256 expectedRewards) 
-    {
+    ) external view returns (uint256 expectedRewards) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage userInf = userInfo[poolId][user];
-        
+
         if (pool.totalStaked == 0 || userInf.staked == 0) {
             return 0;
         }
-        
+
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
             // expectedRewards = (userStaked * rewardRatePerSecond * duration) / totalStaked
-            expectedRewards = (userInf.staked * pool.rewardRatePerSecond * durationSeconds) / pool.totalStaked;
+            expectedRewards =
+                (userInf.staked * pool.rewardRatePerSecond * durationSeconds) /
+                pool.totalStaked;
+        } else if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
+            uint256 totalPoolRewards = 0;
+            uint256 timeProcessed = 0;
+            uint256 currentWeekIndex = pool.weeklyRewardIndex;
+            uint256 currentTime = pool.lastRewardTime;
+
+            // Process time across potentially multiple weeks
+            while (
+                timeProcessed < durationSeconds &&
+                currentWeekIndex < pool.weeklyRewards.length
+            ) {
+                uint256 weekEndTime = pool.weeklyRewardStart +
+                    (currentWeekIndex + 1) *
+                    WEEK_SECONDS;
+                uint256 timeLeftInDuration = durationSeconds - timeProcessed;
+
+                if (currentTime >= weekEndTime) {
+                    currentWeekIndex++;
+                    currentTime = weekEndTime;
+                    continue;
+                }
+
+                uint256 timeLeftInWeek = weekEndTime - currentTime;
+                uint256 timeInThisWeek = timeLeftInDuration < timeLeftInWeek
+                    ? timeLeftInDuration
+                    : timeLeftInWeek;
+
+                uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
+                uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS;
+                totalPoolRewards += (timeInThisWeek * rewardRate) / PRECISION;
+
+                timeProcessed += timeInThisWeek;
+                currentTime += timeInThisWeek;
+
+                if (timeInThisWeek == timeLeftInWeek) {
+                    currentWeekIndex++;
+                    currentTime = weekEndTime;
+                }
+            }
+            expectedRewards =
+                (userInf.staked * totalPoolRewards) /
+                pool.totalStaked;
         } else {
             // For MONTHLY, calculate using rate-per-second model across months
             uint256 totalPoolRewards = 0;
             uint256 timeProcessed = 0;
             uint256 currentMonthIndex = pool.monthlyRewardIndex;
-            
+
             // Process time across potentially multiple months
-            while (timeProcessed < durationSeconds && currentMonthIndex < pool.monthlyRewards.length) {
+            while (
+                timeProcessed < durationSeconds &&
+                currentMonthIndex < pool.monthlyRewards.length
+            ) {
                 uint256 timeInMonth;
                 uint256 timeLeftInDuration = durationSeconds - timeProcessed;
-                
+
                 // Determine if we stay in current month or cross to next
                 if (currentMonthIndex == pool.monthlyRewardIndex) {
                     // First month: may be partial
-                    uint256 timeElapsedInMonth = block.timestamp - pool.monthlyRewardStart - (currentMonthIndex * 30 days);
+                    uint256 timeElapsedInMonth = block.timestamp -
+                        pool.monthlyRewardStart -
+                        (currentMonthIndex * 30 days);
                     uint256 timeLeftInMonth = 30 days - timeElapsedInMonth;
-                    timeInMonth = timeLeftInDuration < timeLeftInMonth ? timeLeftInDuration : timeLeftInMonth;
+                    timeInMonth = timeLeftInDuration < timeLeftInMonth
+                        ? timeLeftInDuration
+                        : timeLeftInMonth;
                 } else {
                     // Subsequent months: full or partial
-                    timeInMonth = timeLeftInDuration < 30 days ? timeLeftInDuration : 30 days;
+                    timeInMonth = timeLeftInDuration < 30 days
+                        ? timeLeftInDuration
+                        : 30 days;
                 }
-                
+
                 // Calculate rewards for this time period at this month's rate
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
                 uint256 rewardRate = (monthReward * PRECISION) / 30 days;
@@ -1213,12 +1390,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 timeProcessed += timeInMonth;
                 currentMonthIndex++;
             }
-            
+
             // User's share of total pool rewards
-            expectedRewards = (userInf.staked * totalPoolRewards) / pool.totalStaked;
+            expectedRewards =
+                (userInf.staked * totalPoolRewards) /
+                pool.totalStaked;
         }
     }
-    
+
     /// @notice Calculate ROI (Return on Investment) for a user
     /// @param poolId The pool ID
     /// @param user User address
@@ -1230,42 +1409,49 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         address user,
         uint256 durationSeconds,
         uint256 ecmPriceInUsdt
-    ) 
-        external 
-        view 
-        returns (uint256 roi) 
-    {
+    ) external view returns (uint256 roi) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage userInf = userInfo[poolId][user];
-        
+
         if (pool.totalStaked == 0 || userInf.staked == 0) {
             return 0;
         }
-        
+
         // Calculate expected rewards
         uint256 expectedRewards;
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
-            expectedRewards = (userInf.staked * pool.rewardRatePerSecond * durationSeconds) / pool.totalStaked;
+            expectedRewards =
+                (userInf.staked * pool.rewardRatePerSecond * durationSeconds) /
+                pool.totalStaked;
         } else {
             // Use same logic as calculateExpectedRewards for MONTHLY
             uint256 totalPoolRewards = 0;
             uint256 timeProcessed = 0;
             uint256 currentMonthIndex = pool.monthlyRewardIndex;
-            
-            while (timeProcessed < durationSeconds && currentMonthIndex < pool.monthlyRewards.length) {
+
+            while (
+                timeProcessed < durationSeconds &&
+                currentMonthIndex < pool.monthlyRewards.length
+            ) {
                 uint256 timeInMonth;
                 uint256 timeLeftInDuration = durationSeconds - timeProcessed;
-                
+
                 if (currentMonthIndex == pool.monthlyRewardIndex) {
-                    uint256 timeElapsedInMonth = block.timestamp - pool.monthlyRewardStart - (currentMonthIndex * 30 days);
+                    uint256 timeElapsedInMonth = block.timestamp -
+                        pool.monthlyRewardStart -
+                        (currentMonthIndex * 30 days);
                     uint256 timeLeftInMonth = 30 days - timeElapsedInMonth;
-                    timeInMonth = timeLeftInDuration < timeLeftInMonth ? timeLeftInDuration : timeLeftInMonth;
+                    timeInMonth = timeLeftInDuration < timeLeftInMonth
+                        ? timeLeftInDuration
+                        : timeLeftInMonth;
                 } else {
-                    timeInMonth = timeLeftInDuration < 30 days ? timeLeftInDuration : 30 days;
+                    timeInMonth = timeLeftInDuration < 30 days
+                        ? timeLeftInDuration
+                        : 30 days;
                 }
-                
+
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
                 uint256 rewardRate = (monthReward * PRECISION) / 30 days;
                 totalPoolRewards += (timeInMonth * rewardRate) / PRECISION;
@@ -1273,107 +1459,116 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 timeProcessed += timeInMonth;
                 currentMonthIndex++;
             }
-            
-            expectedRewards = (userInf.staked * totalPoolRewards) / pool.totalStaked;
+
+            expectedRewards =
+                (userInf.staked * totalPoolRewards) /
+                pool.totalStaked;
         }
-        
+
         // Calculate reward value in USDT
-        uint256 rewardValueUsdt = (expectedRewards * ecmPriceInUsdt) / PRECISION;
-        
+        uint256 rewardValueUsdt = (expectedRewards * ecmPriceInUsdt) /
+            PRECISION;
+
         // Calculate investment value (assume user bought at current price)
         uint256 investmentUsdt = (userInf.staked * ecmPriceInUsdt) / PRECISION;
-        
+
         if (investmentUsdt == 0) return 0;
-        
+
         // ROI = (rewardValue / investment) * 100
         roi = (rewardValueUsdt * PRECISION * 100) / investmentUsdt;
     }
-    
+
     /// @notice Calculate TVL (Total Value Locked) in USDT
     /// @param poolId The pool ID
     /// @param ecmPriceInUsdt Current ECM price in USDT (scaled by 1e18)
     /// @return tvl Total Value Locked in USDT (scaled by 1e6 for USDT decimals)
-    function calculateTVL(uint256 poolId, uint256 ecmPriceInUsdt) 
-        external 
-        view 
-        returns (uint256 tvl) 
-    {
+    function calculateTVL(
+        uint256 poolId,
+        uint256 ecmPriceInUsdt
+    ) external view returns (uint256 tvl) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
+
         // TVL = totalStaked * ecmPrice
         // ecmPrice is scaled by 1e18, totalStaked by 1e18
         // Result scaled by 1e6 for USDT
         tvl = (pool.totalStaked * ecmPriceInUsdt) / (PRECISION * 1e12);
     }
-    
+
     /// @notice Calculate pool utilization rate (percentage of allocated ECM sold)
     /// @param poolId The pool ID
     /// @return utilizationRate Percentage (scaled by 1e18, so 75% = 75e18)
-    function calculateUtilizationRate(uint256 poolId) 
-        external 
-        view 
-        returns (uint256 utilizationRate) 
-    {
+    function calculateUtilizationRate(
+        uint256 poolId
+    ) external view returns (uint256 utilizationRate) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
+
         if (pool.allocatedForSale == 0) return 0;
-        
+
         // Utilization = (sold / allocatedForSale) * 100
         utilizationRate = (pool.sold * PRECISION * 100) / pool.allocatedForSale;
     }
-    
+
     /// @notice Calculate reward pool depletion time
     /// @param poolId The pool ID
     /// @return depletionTimestamp Estimated timestamp when rewards will be depleted (0 if infinite)
     /// @return daysRemaining Days until depletion
     /// @return isInfinite True if depletion is infinite (rate is 0)
-    function calculateRewardDepletionTime(uint256 poolId) 
-        external 
-        view 
+    function calculateRewardDepletionTime(
+        uint256 poolId
+    )
+        external
+        view
         returns (
             uint256 depletionTimestamp,
             uint256 daysRemaining,
             bool isInfinite
-        ) 
+        )
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
-        uint256 remainingRewards = pool.allocatedForRewards - pool.totalRewardsAccrued;
-        
+
+        uint256 remainingRewards = pool.allocatedForRewards -
+            pool.totalRewardsAccrued;
+
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
             if (pool.rewardRatePerSecond == 0) {
                 return (0, 0, true);
             }
-            
-            uint256 secondsRemaining = remainingRewards / pool.rewardRatePerSecond;
+
+            uint256 secondsRemaining = remainingRewards /
+                pool.rewardRatePerSecond;
             depletionTimestamp = block.timestamp + secondsRemaining;
             daysRemaining = secondsRemaining / 86400;
             isInfinite = false;
         } else {
             // For MONTHLY, calculate based on remaining months
             uint256 totalMonthlyRemaining = 0;
-            for (uint256 i = pool.monthlyRewardIndex; i < pool.monthlyRewards.length; i++) {
+            for (
+                uint256 i = pool.monthlyRewardIndex;
+                i < pool.monthlyRewards.length;
+                i++
+            ) {
                 totalMonthlyRemaining += pool.monthlyRewards[i];
             }
-            
+
             if (totalMonthlyRemaining == 0) {
                 return (block.timestamp, 0, false);
             }
-            
-            uint256 monthsRemaining = pool.monthlyRewards.length - pool.monthlyRewardIndex;
+
+            uint256 monthsRemaining = pool.monthlyRewards.length -
+                pool.monthlyRewardIndex;
             uint256 secondsRemaining = monthsRemaining * 30 days;
             depletionTimestamp = block.timestamp + secondsRemaining;
             daysRemaining = secondsRemaining / 86400;
             isInfinite = false;
         }
     }
-    
+
     /// @notice Get comprehensive pool analytics
     /// @param poolId The pool ID
     /// @param ecmPriceInUsdt Current ECM price (scaled by 1e18)
@@ -1384,9 +1579,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @return lifetimeStakeVolume Cumulative ECM staked
     /// @return lifetimeUnstakeVolume Cumulative ECM unstaked
     /// @return currentTVL Current TVL in USDT (scaled by 1e6)
-    function getPoolAnalytics(uint256 poolId, uint256 ecmPriceInUsdt) 
-        external 
-        view 
+    function getPoolAnalytics(
+        uint256 poolId,
+        uint256 ecmPriceInUsdt
+    )
+        external
+        view
         returns (
             uint256 poolAge,
             uint256 totalUniqueStakers,
@@ -1395,12 +1593,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             uint256 lifetimeStakeVolume,
             uint256 lifetimeUnstakeVolume,
             uint256 currentTVL
-        ) 
+        )
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
-        
+
         poolAge = block.timestamp - pool.poolCreatedAt;
         totalUniqueStakers = pool.totalUniqueStakers;
         totalPenaltiesCollected = pool.totalPenaltiesCollected;
@@ -1409,7 +1607,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         lifetimeUnstakeVolume = pool.lifetimeUnstakeVolume;
         currentTVL = (pool.totalStaked * ecmPriceInUsdt) / (PRECISION * 1e12);
     }
-    
+
     /// @notice Get comprehensive user analytics
     /// @param poolId The pool ID
     /// @param user User address
@@ -1421,9 +1619,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @return totalRewardsClaimed Lifetime rewards claimed
     /// @return totalPenaltiesPaid Total penalties paid
     /// @return accountAge Age of user's account in pool (seconds)
-    function getUserAnalytics(uint256 poolId, address user) 
-        external 
-        view 
+    function getUserAnalytics(
+        uint256 poolId,
+        address user
+    )
+        external
+        view
         returns (
             bool hasStaked,
             uint256 firstStakeTimestamp,
@@ -1433,12 +1634,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             uint256 totalRewardsClaimed,
             uint256 totalPenaltiesPaid,
             uint256 accountAge
-        ) 
+        )
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         UserInfo storage userInf = userInfo[poolId][user];
-        
+
         hasStaked = userInf.hasStaked;
         firstStakeTimestamp = userInf.firstStakeTimestamp;
         lastActionTimestamp = userInf.lastActionTimestamp;
@@ -1446,14 +1647,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         totalUnstaked = userInf.totalUnstaked;
         totalRewardsClaimed = userInf.totalRewardsClaimed;
         totalPenaltiesPaid = userInf.totalPenaltiesPaid;
-        
+
         if (userInf.firstStakeTimestamp > 0) {
             accountAge = block.timestamp - userInf.firstStakeTimestamp;
         } else {
             accountAge = 0;
         }
     }
-    
+
     /// @notice Calculate early unstake penalty for a user
     /// @param poolId The pool ID
     /// @param user User address
@@ -1461,27 +1662,30 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @return penaltyAmount Amount of ECM that will be slashed
     /// @return amountReceived Amount user will receive after penalty
     /// @return timeUntilMaturity Seconds until stake matures (0 if matured)
-    function calculateUnstakePenalty(uint256 poolId, address user) 
-        external 
-        view 
+    function calculateUnstakePenalty(
+        uint256 poolId,
+        address user
+    )
+        external
+        view
         returns (
             bool willBePenalized,
             uint256 penaltyAmount,
             uint256 amountReceived,
             uint256 timeUntilMaturity
-        ) 
+        )
     {
         if (poolId >= poolCount) revert PoolDoesNotExist();
-        
+
         Pool storage pool = pools[poolId];
         UserInfo storage userInf = userInfo[poolId][user];
-        
+
         if (userInf.staked == 0) {
             return (false, 0, 0, 0);
         }
-        
+
         uint256 maturityTime = userInf.stakeStart + userInf.stakeDuration;
-        
+
         if (block.timestamp >= maturityTime) {
             // Matured - no penalty
             return (false, 0, userInf.staked, 0);
@@ -1493,23 +1697,23 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             timeUntilMaturity = maturityTime - block.timestamp;
         }
     }
-    
+
     // ============================================
     // INTERNAL FUNCTIONS - REWARDS
     // ============================================
-    
+
     /// @notice Updates pool reward variables using accRewardPerShare pattern
     /// @param poolId The pool ID
     /// @dev CRITICAL: Must be called before ANY stake/unstake/claim operation
-    /// 
+    ///
     /// Mathematical Purpose:
     /// Updates accRewardPerShare which tracks cumulative rewards per staked token
     /// Formula: accRewardPerShare += (rewardAccrued * 1e18) / totalStaked
-    /// 
+    ///
     /// Why 1e18 scaling?
     /// - Prevents precision loss in integer division
     /// - Allows accurate reward calculation even for small stakes
-    /// 
+    ///
     /// Example:
     /// - totalStaked = 1000 ECM
     /// - rewardAccrued = 10 ECM over time period
@@ -1517,20 +1721,21 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// - User with 100 staked gets: (100 * 0.01e18) / 1e18 = 1 ECM reward
     function _updatePoolRewards(uint256 poolId) internal {
         Pool storage pool = pools[poolId];
-        
+
         if (block.timestamp <= pool.lastRewardTime) return;
-        
+
         if (pool.totalStaked == 0) {
             pool.lastRewardTime = block.timestamp;
             return;
         }
-        
+
         uint256 delta = block.timestamp - pool.lastRewardTime;
         uint256 rewardAccrued = _calculateRewardAccrued(pool, delta);
-        
+
         if (rewardAccrued > 0) {
             // Cap rewardAccrued to remaining rewards to prevent over-promising
-            uint256 remainingRewards = pool.allocatedForRewards - pool.totalRewardsAccrued;
+            uint256 remainingRewards = pool.allocatedForRewards -
+                pool.totalRewardsAccrued;
             if (rewardAccrued > remainingRewards) {
                 rewardAccrued = remainingRewards;
                 // Stop future reward accrual when depleted
@@ -1540,15 +1745,17 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                     pool.monthlyRewardIndex = pool.monthlyRewards.length;
                 }
             }
-            
+
             // Track total accrued rewards
             pool.totalRewardsAccrued += rewardAccrued;
 
             if (pool.totalStaked > 0) {
-                pool.accRewardPerShare += (rewardAccrued * PRECISION) / pool.totalStaked;
+                pool.accRewardPerShare +=
+                    (rewardAccrued * PRECISION) /
+                    pool.totalStaked;
             }
         }
-        
+
         pool.lastRewardTime = block.timestamp;
     }
 
@@ -1557,15 +1764,16 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param delta Time elapsed in seconds
     /// @return rewardAccrued Amount of reward accrued
     /// @dev NOT view - updates state for MONTHLY strategy
-    function _calculateRewardAccrued(Pool storage pool, uint256 delta) 
-        internal 
-        returns (uint256 rewardAccrued) 
-    {
-        if (pool.rewardStrategy == RewardStrategy.LINEAR) {
-            rewardAccrued = delta * pool.rewardRatePerSecond;
-        } else {
-            // MONTHLY strategy - calculates and updates month progression
+    function _calculateRewardAccrued(
+        Pool storage pool,
+        uint256 delta
+    ) internal returns (uint256 rewardAccrued) {
+        if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
+            rewardAccrued = _calculateWeeklyRewards(pool, delta);
+        } else if (pool.rewardStrategy == RewardStrategy.MONTHLY) {
             rewardAccrued = _calculateMonthlyRewards(pool, delta);
+        } else {
+            rewardAccrued = delta * pool.rewardRatePerSecond;
         }
     }
 
@@ -1574,32 +1782,40 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param delta Time elapsed in seconds
     /// @return totalRewards Total rewards for elapsed time
     /// @dev Updates monthlyRewardIndex as months pass, distributes rewards continuously
-    function _calculateMonthlyRewards(Pool storage pool, uint256 delta) 
-        internal 
-        returns (uint256 totalRewards) 
-    {
+    function _calculateMonthlyRewards(
+        Pool storage pool,
+        uint256 delta
+    ) internal returns (uint256 totalRewards) {
         if (pool.monthlyRewards.length == 0) return 0;
         if (pool.monthlyRewardIndex >= pool.monthlyRewards.length) return 0; // All months completed
-        
+
         uint256 timeProcessed = 0;
         uint256 currentTime = pool.lastRewardTime;
-        
+
         // Process time across potentially multiple months
-        while (timeProcessed < delta && pool.monthlyRewardIndex < pool.monthlyRewards.length) {
+        while (
+            timeProcessed < delta &&
+            pool.monthlyRewardIndex < pool.monthlyRewards.length
+        ) {
             // Calculate when current month ends
-            uint256 monthEndTime = pool.monthlyRewardStart + ((pool.monthlyRewardIndex + 1) * 30 days);
+            uint256 monthEndTime = pool.monthlyRewardStart +
+                ((pool.monthlyRewardIndex + 1) * 30 days);
             uint256 timeLeftInDelta = delta - timeProcessed;
-            
+
             if (currentTime + timeLeftInDelta <= monthEndTime) {
                 // All remaining time is within current month
-                uint256 monthReward = pool.monthlyRewards[pool.monthlyRewardIndex];
-                uint256 rewardRate = (monthReward  * PRECISION) / 30 days; // Rewards per second this month
+                uint256 monthReward = pool.monthlyRewards[
+                    pool.monthlyRewardIndex
+                ];
+                uint256 rewardRate = (monthReward * PRECISION) / 30 days; // Rewards per second this month
                 totalRewards += (timeLeftInDelta * rewardRate) / PRECISION;
                 timeProcessed = delta; // Done processing
             } else {
                 // Time crosses into next month
                 uint256 timeInThisMonth = monthEndTime - currentTime;
-                uint256 monthReward = pool.monthlyRewards[pool.monthlyRewardIndex];
+                uint256 monthReward = pool.monthlyRewards[
+                    pool.monthlyRewardIndex
+                ];
                 uint256 rewardRate = (monthReward * PRECISION) / 30 days; // Rewards per second this month
                 totalRewards += (timeInThisMonth * rewardRate) / PRECISION;
 
@@ -1609,7 +1825,114 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 timeProcessed += timeInThisMonth;
             }
         }
-        
+
+        return totalRewards;
+    }
+
+    /// @notice Calculates weekly rewards with proper week progression
+    /// @param pool Pool storage reference
+    /// @param delta Time elapsed in seconds
+    /// @return totalRewards Total rewards for elapsed time
+    /// @dev Updates weeklyRewardIndex as weeks pass, distributes rewards continuously
+    function _calculateWeeklyRewards(
+        Pool storage pool,
+        uint256 delta
+    ) internal returns (uint256 totalRewards) {
+        if (pool.weeklyRewards.length == 0) return 0;
+        if (pool.weeklyRewardIndex >= pool.weeklyRewards.length) return 0;
+
+        uint256 timeProcessed = 0;
+        uint256 currentTime = pool.lastRewardTime;
+        uint256 currentWeekIndex = pool.weeklyRewardIndex; // LOCAL copy
+
+        while (
+            timeProcessed < delta &&
+            currentWeekIndex < pool.weeklyRewards.length
+        ) {
+            uint256 weekEndTime = pool.weeklyRewardStart +
+                (currentWeekIndex + 1) *
+                WEEK_SECONDS;
+
+            uint256 timeLeftInDelta = delta - timeProcessed;
+            if (currentTime >= weekEndTime) {
+                // Time has already passed this week, move to next
+                currentWeekIndex++;
+                currentTime = weekEndTime;
+                continue;
+            }
+
+            uint256 timeLeftInWeek = weekEndTime - currentTime;
+            uint256 timeInThisWeek = timeLeftInDelta < timeLeftInWeek
+                ? timeLeftInDelta
+                : timeLeftInWeek;
+
+            uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
+            uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS; // Rewards per second this week
+            totalRewards += (timeInThisWeek * rewardRate) / PRECISION;
+
+            timeProcessed += timeInThisWeek;
+            currentTime += timeInThisWeek;
+
+            if (timeInThisWeek == timeLeftInWeek) {
+                // Move to next week
+                currentWeekIndex++;
+                currentTime = weekEndTime;
+            }
+        }
+
+        // Update state variables
+        pool.weeklyRewardIndex = currentWeekIndex;
+        return totalRewards;
+    }
+
+    /// @notice Calculates weekly rewards WITHOUT modifying state (VIEW ONLY)
+    /// @param pool Pool storage reference
+    /// @param delta Time elapsed in seconds
+    /// @return totalRewards Total rewards for elapsed time
+    /// @dev View-only version - does NOT update weeklyRewardIndex
+    function _calculateWeeklyRewardsView(
+        Pool storage pool,
+        uint256 delta
+    ) internal view returns (uint256 totalRewards) {
+        if (pool.weeklyRewards.length == 0) return 0;
+        if (pool.weeklyRewardIndex >= pool.weeklyRewards.length) return 0;
+
+        uint256 timeProcessed = 0;
+        uint256 currentTime = pool.lastRewardTime;
+        uint256 currentWeekIndex = pool.weeklyRewardIndex; // LOCAL copy
+
+        while (
+            timeProcessed < delta &&
+            currentWeekIndex < pool.weeklyRewards.length
+        ) {
+            uint256 weekEndTime = pool.weeklyRewardStart +
+                (currentWeekIndex + 1) *
+                WEEK_SECONDS;
+
+            uint256 timeLeftInDelta = delta - timeProcessed;
+            if (currentTime >= weekEndTime) {
+                currentWeekIndex++;
+                currentTime = weekEndTime;
+                continue;
+            }
+
+            uint256 timeLeftInWeek = weekEndTime - currentTime;
+            uint256 timeInThisWeek = timeLeftInDelta < timeLeftInWeek
+                ? timeLeftInDelta
+                : timeLeftInWeek;
+
+            uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
+            uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS;
+            totalRewards += (timeInThisWeek * rewardRate) / PRECISION;
+
+            timeProcessed += timeInThisWeek;
+            currentTime += timeInThisWeek;
+
+            if (timeInThisWeek == timeLeftInWeek) {
+                currentWeekIndex++;
+                currentTime = weekEndTime;
+            }
+        }
         return totalRewards;
     }
 
@@ -1618,13 +1941,15 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param delta Time elapsed in seconds
     /// @return rewardAccrued Amount of reward accrued
     /// @dev View-only version for pendingRewards() - does NOT update monthlyRewardIndex
-    function _calculateRewardAccruedView(Pool storage pool, uint256 delta) 
-        internal 
-        view 
-        returns (uint256 rewardAccrued) 
-    {
+    function _calculateRewardAccruedView(
+        Pool storage pool,
+        uint256 delta
+    ) internal view returns (uint256 rewardAccrued) {
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
             rewardAccrued = delta * pool.rewardRatePerSecond;
+        } else if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
+            // WEEKLY strategy - view-only calculation (no state updates)
+            rewardAccrued = _calculateWeeklyRewardsView(pool, delta);
         } else {
             // MONTHLY strategy - view-only calculation (no state updates)
             rewardAccrued = _calculateMonthlyRewardsView(pool, delta);
@@ -1636,24 +1961,27 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param delta Time elapsed in seconds
     /// @return totalRewards Total rewards for elapsed time
     /// @dev View-only version - does NOT update monthlyRewardIndex
-    function _calculateMonthlyRewardsView(Pool storage pool, uint256 delta) 
-        internal 
-        view 
-        returns (uint256 totalRewards) 
-    {
+    function _calculateMonthlyRewardsView(
+        Pool storage pool,
+        uint256 delta
+    ) internal view returns (uint256 totalRewards) {
         if (pool.monthlyRewards.length == 0) return 0;
         if (pool.monthlyRewardIndex >= pool.monthlyRewards.length) return 0;
-        
+
         uint256 timeProcessed = 0;
         uint256 currentTime = pool.lastRewardTime;
         uint256 currentMonthIndex = pool.monthlyRewardIndex; // LOCAL copy - don't modify storage
-        
+
         // Process time across potentially multiple months
-        while (timeProcessed < delta && currentMonthIndex < pool.monthlyRewards.length) {
+        while (
+            timeProcessed < delta &&
+            currentMonthIndex < pool.monthlyRewards.length
+        ) {
             // Calculate when current month ends
-            uint256 monthEndTime = pool.monthlyRewardStart + ((currentMonthIndex + 1) * 30 days);
+            uint256 monthEndTime = pool.monthlyRewardStart +
+                ((currentMonthIndex + 1) * 30 days);
             uint256 timeLeftInDelta = delta - timeProcessed;
-            
+
             if (currentTime + timeLeftInDelta <= monthEndTime) {
                 // All remaining time is within current month
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
@@ -1673,7 +2001,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 timeProcessed += timeInThisMonth;
             }
         }
-        
+
         return totalRewards;
     }
 
@@ -1681,70 +2009,83 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param user User address
     /// @param amount Reward amount
-    function _claimOrVestRewards(uint256 poolId, address user, uint256 amount) internal {
+    function _claimOrVestRewards(
+        uint256 poolId,
+        address user,
+        uint256 amount
+    ) internal returns (uint256 paidAmount) {
         Pool storage pool = pools[poolId];
 
         // Enforce hard limit on rewards
         uint256 remainingRewards = pool.allocatedForRewards - pool.rewardsPaid;
         if (amount > remainingRewards) {
             amount = remainingRewards;
-            if (amount == 0) return; // No rewards left to claim
+            if (amount == 0) return 0; // No rewards left to claim
         }
-        
+
         // Update rewardsPaid for ALL distributions (both immediate and vested)
         pool.rewardsPaid += amount;
 
         // Use pool's vesting configuration only
         bool shouldVest = pool.vestRewardsByDefault;
-        
-        if (shouldVest && address(vestingManager) != address(0) && pool.vestingDuration > 0) {
-            // Transfer to VestingManager and create vesting
-            pool.ecm.forceApprove(address(vestingManager), amount);
-            
-            // Track vested amount (will be updated by callback from VestingManager)
-            // Don't increment here to avoid double-counting
-            
-            // Create vesting schedule
-            vestingManager.createVesting(
-                user, 
-                amount, 
-                block.timestamp, 
+        if (
+            shouldVest &&
+            address(vestingManager) != address(0) &&
+            pool.vestingDuration > 0
+        ) {
+            // Transfer tokens to VestingManager and create vesting schedule
+            pool.ecm.safeTransfer(address(vestingManager), amount);
+            uint256 vestingId;
+            try vestingManager.createVesting(
+                user,
+                amount,
+                block.timestamp,
                 pool.vestingDuration,
                 address(pool.ecm),
                 poolId
-            );
-
+            ) returns (uint256 _vestingId) {
+                vestingId = _vestingId;
+                emit RewardsVested(
+                    poolId,
+                    user,
+                    amount,
+                    vestingId,
+                    pool.vestingDuration
+                );
+            } catch {
+                revert VestingFailed();
+            }
             pool.ecmVested += amount;
-            
             emit RewardsClaimed(poolId, user, amount, true);
         } else {
             // Direct transfer - track as paid rewards
             pool.ecm.safeTransfer(user, amount);
             emit RewardsClaimed(poolId, user, amount, false);
         }
+
+        return amount;
     }
 
     // ============================================
     // INTERNAL FUNCTIONS - PRICING
     // ============================================
-    
+
     /// @notice Calculates ECM amount out for USDT amount in using Uniswap V2 AMM formula
     /// @param poolId The pool ID
     /// @param usdtAmountIn USDT amount in
     /// @return ecmAmountOut ECM amount out
     /// @dev Uses spot price from Uniswap V2 pair reserves (NO TWAP)
-    function _getECMAmountOut(uint256 poolId, uint256 usdtAmountIn) 
-        internal 
-        view 
-        returns (uint256 ecmAmountOut) 
-    {
+    function _getECMAmountOut(
+        uint256 poolId,
+        uint256 usdtAmountIn
+    ) internal view returns (uint256 ecmAmountOut) {
         Pool storage pool = pools[poolId];
-        (uint112 reserve0, uint112 reserve1,) = pool.pair.getReserves();
-        
+        (uint112 reserve0, uint112 reserve1, ) = pool.pair.getReserves();
+
         address token0 = pool.pair.token0();
         uint256 reserveIn;
         uint256 reserveOut;
-        
+
         if (token0 == address(pool.usdt)) {
             reserveIn = uint256(reserve0);
             reserveOut = uint256(reserve1);
@@ -1753,7 +2094,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             reserveOut = uint256(reserve0);
         }
 
-        ecmAmountOut = uniswapRouter.getAmountOut(usdtAmountIn, reserveIn, reserveOut);
+        ecmAmountOut = uniswapRouter.getAmountOut(
+            usdtAmountIn,
+            reserveIn,
+            reserveOut
+        );
     }
 
     /// @notice Calculates USDT amount in for exact ECM amount out (inverse formula)
@@ -1761,18 +2106,17 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param ecmAmountOut ECM amount out
     /// @return usdtAmountIn USDT amount in
     /// @dev Inverse of _getECMAmountOut - calculates required USDT for exact ECM
-    function _getUSDTAmountIn(uint256 poolId, uint256 ecmAmountOut) 
-        internal 
-        view 
-        returns (uint256 usdtAmountIn) 
-    {
+    function _getUSDTAmountIn(
+        uint256 poolId,
+        uint256 ecmAmountOut
+    ) internal view returns (uint256 usdtAmountIn) {
         Pool storage pool = pools[poolId];
-        (uint112 reserve0, uint112 reserve1,) = pool.pair.getReserves();
-        
+        (uint112 reserve0, uint112 reserve1, ) = pool.pair.getReserves();
+
         address token0 = pool.pair.token0();
         uint256 reserveIn;
         uint256 reserveOut;
-        
+
         if (token0 == address(pool.usdt)) {
             reserveIn = uint256(reserve0);
             reserveOut = uint256(reserve1);
@@ -1782,31 +2126,34 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         }
 
         // Get exact USDT amount in for the floored ECM amount out
-        usdtAmountIn = uniswapRouter.getAmountIn(ecmAmountOut, reserveIn, reserveOut);
+        usdtAmountIn = uniswapRouter.getAmountIn(
+            ecmAmountOut,
+            reserveIn,
+            reserveOut
+        );
     }
 
     // ============================================
     // INTERNAL FUNCTIONS - HELPERS
     // ============================================
-    
+
     /// @notice Checks if stake duration is allowed
     /// @param poolId The pool ID
     /// @param duration Duration to check
     /// @return allowed Whether the duration is allowed
-    function _isAllowedDuration(uint256 poolId, uint256 duration) 
-        internal 
-        view 
-        returns (bool allowed) 
-    {
+    function _isAllowedDuration(
+        uint256 poolId,
+        uint256 duration
+    ) internal view returns (bool allowed) {
         Pool storage pool = pools[poolId];
         uint256[] memory durations = pool.allowedStakeDurations;
-        
+
         for (uint256 i = 0; i < durations.length; i++) {
             if (durations[i] == duration) {
                 return true;
             }
         }
-        
+
         return false;
     }
 }
