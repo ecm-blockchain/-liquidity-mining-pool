@@ -6,7 +6,7 @@
   "scripts": {
     "clean": "hardhat clean",
     "build": "hardhat compile",
-    "test": "hardhat test",
+    "test": "hardhat test --network hardhat",
     "test:logs": "hardhat test --trace",
     "watch": "hardhat watch compilation",
     "flatten": "hardhat flatten contracts/StakingPool.sol > flattened/StakingPool.flattened.sol",

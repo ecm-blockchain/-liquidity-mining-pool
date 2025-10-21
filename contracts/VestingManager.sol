@@ -24,48 +24,48 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // STRUCTS
     // ============================================
-    
+
     /// @notice Vesting schedule structure
     struct VestingSchedule {
-        address beneficiary;      // Who receives the vested tokens
-        address token;            // Token being vested (ECM)
-        uint256 poolId;           // Associated pool ID (for callback)
-        uint256 amount;           // Total amount to vest
-        uint256 start;            // Vesting start timestamp
-        uint256 duration;         // Vesting duration in seconds
-        uint256 claimed;          // Amount already claimed
-        bool revoked;             // Whether vesting was revoked
+        address beneficiary; // Who receives the vested tokens
+        address token; // Token being vested (ECM)
+        uint256 poolId; // Associated pool ID (for callback)
+        uint256 amount; // Total amount to vest
+        uint256 start; // Vesting start timestamp
+        uint256 duration; // Vesting duration in seconds
+        uint256 claimed; // Amount already claimed
+        bool revoked; // Whether vesting was revoked
     }
 
     // ============================================
     // STATE VARIABLES
     // ============================================
-    
+
     /// @notice PoolManager address for callbacks
     IPoolManager public poolManager;
-    
+
     /// @notice Mapping of vesting ID to vesting schedule
     mapping(uint256 => VestingSchedule) public vestingSchedules;
-    
+
     /// @notice Mapping of user address to their vesting IDs
     mapping(address => uint256[]) public userVestingIds;
-    
+
     /// @notice Next vesting ID to be assigned
     uint256 public nextVestingId;
-    
+
     /// @notice Addresses authorized to create vesting schedules (e.g., PoolManager)
     mapping(address => bool) public authorizedCreators;
-    
+
     /// @notice Total vested amount per token
     mapping(address => uint256) public totalVestedAmount;
-    
+
     /// @notice Total claimed amount per token
     mapping(address => uint256) public totalClaimedAmount;
 
     // ============================================
     // EVENTS
     // ============================================
-    
+
     event VestingCreated(
         uint256 indexed vestingId,
         address indexed beneficiary,
@@ -74,24 +74,24 @@ contract VestingManager is Ownable, ReentrancyGuard {
         uint256 start,
         uint256 duration
     );
-    
+
     event VestedClaimed(
         uint256 indexed vestingId,
         address indexed beneficiary,
         address indexed token,
         uint256 amount
     );
-    
+
     event VestingRevoked(
         uint256 indexed vestingId,
         address indexed beneficiary,
         uint256 amountVested,
         uint256 amountRefunded
     );
-    
+
     event AuthorizedCreatorAdded(address indexed creator);
     event AuthorizedCreatorRemoved(address indexed creator);
-    
+
     event EmergencyWithdraw(
         address indexed token,
         uint256 amount,
@@ -101,7 +101,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // ERRORS
     // ============================================
-    
+
     error NotAuthorized();
     error InvalidBeneficiary();
     error InvalidAmount();
@@ -117,7 +117,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // MODIFIERS
     // ============================================
-    
+
     /// @notice Restricts function to authorized creators only
     modifier onlyAuthorized() {
         if (!authorizedCreators[msg.sender] && msg.sender != owner()) {
@@ -129,7 +129,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // CONSTRUCTOR
     // ============================================
-    
+
     constructor(address _poolManager) Ownable(msg.sender) {
         if (_poolManager != address(0)) {
             poolManager = IPoolManager(_poolManager);
@@ -139,7 +139,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // ADMIN FUNCTIONS
     // ============================================
-    
+
     /// @notice Adds an authorized creator (e.g., PoolManager)
     /// @param creator Address to authorize
     function addAuthorizedCreator(address creator) external onlyOwner {
@@ -168,7 +168,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
         if (token == address(0)) revert InvalidToken();
         if (amount == 0) revert InvalidAmount();
         if (to == address(0)) revert InvalidBeneficiary();
-        
+
         IERC20(token).safeTransfer(to, amount);
         emit EmergencyWithdraw(token, amount, to);
     }
@@ -176,7 +176,7 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // VESTING CREATION
     // ============================================
-    
+
     /// @notice Creates a new vesting schedule
     /// @dev Only callable by authorized creators (e.g., PoolManager)
     /// @param beneficiary Address that will receive vested tokens
@@ -199,11 +199,11 @@ contract VestingManager is Ownable, ReentrancyGuard {
         if (token == address(0)) revert InvalidToken();
         if (amount == 0) revert InvalidAmount();
         if (duration == 0) revert InvalidDuration();
-        
+
         // Note: Tokens should be transferred to this contract BEFORE calling this function
-        
+
         vestingId = nextVestingId++;
-        
+
         vestingSchedules[vestingId] = VestingSchedule({
             beneficiary: beneficiary,
             token: token,
@@ -214,12 +214,19 @@ contract VestingManager is Ownable, ReentrancyGuard {
             claimed: 0,
             revoked: false
         });
-        
+
         userVestingIds[beneficiary].push(vestingId);
         totalVestedAmount[token] += amount;
-        
-        emit VestingCreated(vestingId, beneficiary, token, amount, start, duration);
-        
+
+        emit VestingCreated(
+            vestingId,
+            beneficiary,
+            token,
+            amount,
+            start,
+            duration
+        );
+
         return vestingId;
     }
 
@@ -243,9 +250,9 @@ contract VestingManager is Ownable, ReentrancyGuard {
         if (token == address(0)) revert InvalidToken();
         if (amount == 0) revert InvalidAmount();
         if (duration == 0) revert InvalidDuration();
-        
+
         vestingId = nextVestingId++;
-        
+
         vestingSchedules[vestingId] = VestingSchedule({
             beneficiary: beneficiary,
             token: token,
@@ -256,42 +263,49 @@ contract VestingManager is Ownable, ReentrancyGuard {
             claimed: 0,
             revoked: false
         });
-        
+
         userVestingIds[beneficiary].push(vestingId);
         totalVestedAmount[token] += amount;
-        
-        emit VestingCreated(vestingId, beneficiary, token, amount, start, duration);
-        
+
+        emit VestingCreated(
+            vestingId,
+            beneficiary,
+            token,
+            amount,
+            start,
+            duration
+        );
+
         return vestingId;
     }
 
     // ============================================
     // USER FUNCTIONS
     // ============================================
-    
+
     /// @notice Claims vested tokens for a specific vesting schedule
     /// @param vestingId The vesting schedule ID
     function claimVested(uint256 vestingId) external nonReentrant {
         VestingSchedule storage schedule = vestingSchedules[vestingId];
-        
+
         // Validation
         if (schedule.beneficiary == address(0)) revert VestingNotFound();
         if (schedule.beneficiary != msg.sender) revert NotBeneficiary();
         if (schedule.revoked) revert AlreadyRevoked();
-        
+
         // Calculate vested amount
         uint256 vested = _calculateVested(schedule);
         uint256 claimable = vested - schedule.claimed;
-        
+
         if (claimable == 0) revert NothingToClaim();
-        
+
         // Update state
         schedule.claimed += claimable;
         totalClaimedAmount[schedule.token] += claimable;
-        
+
         // Transfer tokens
         IERC20(schedule.token).safeTransfer(msg.sender, claimable);
-        
+
         emit VestedClaimed(vestingId, msg.sender, schedule.token, claimable);
     }
 
@@ -299,29 +313,34 @@ contract VestingManager is Ownable, ReentrancyGuard {
     /// @dev Iterates through all vesting schedules for the user
     function claimAllVested() external nonReentrant {
         uint256[] memory vestingIds = userVestingIds[msg.sender];
-        
+
         for (uint256 i = 0; i < vestingIds.length; i++) {
             uint256 vestingId = vestingIds[i];
             VestingSchedule storage schedule = vestingSchedules[vestingId];
-            
+
             // Skip if revoked or already fully claimed
             if (schedule.revoked || schedule.claimed >= schedule.amount) {
                 continue;
             }
-            
+
             // Calculate vested amount
             uint256 vested = _calculateVested(schedule);
             uint256 claimable = vested - schedule.claimed;
-            
+
             if (claimable > 0) {
                 // Update state
                 schedule.claimed += claimable;
                 totalClaimedAmount[schedule.token] += claimable;
-                
+
                 // Transfer tokens
                 IERC20(schedule.token).safeTransfer(msg.sender, claimable);
-                
-                emit VestedClaimed(vestingId, msg.sender, schedule.token, claimable);
+
+                emit VestedClaimed(
+                    vestingId,
+                    msg.sender,
+                    schedule.token,
+                    claimable
+                );
             }
         }
     }
@@ -331,89 +350,79 @@ contract VestingManager is Ownable, ReentrancyGuard {
     /// @param vestingId The vesting schedule ID
     function revokeVesting(uint256 vestingId) external onlyOwner nonReentrant {
         VestingSchedule storage schedule = vestingSchedules[vestingId];
-        
+
         if (schedule.beneficiary == address(0)) revert VestingNotFound();
         if (schedule.revoked) revert AlreadyRevoked();
-        
+
         // Calculate amounts
         uint256 vested = _calculateVested(schedule);
         uint256 unvested = schedule.amount - vested;
-        
+
         // Mark as revoked
         schedule.revoked = true;
-        
+
         // Transfer unvested back to owner
         if (unvested > 0) {
             totalVestedAmount[schedule.token] -= unvested;
             IERC20(schedule.token).safeTransfer(owner(), unvested);
         }
-        
+
         emit VestingRevoked(vestingId, schedule.beneficiary, vested, unvested);
     }
 
     // ============================================
     // VIEW FUNCTIONS
     // ============================================
-    
+
     /// @notice Gets complete vesting schedule information
     /// @param vestingId The vesting schedule ID
     /// @return schedule The vesting schedule struct
-    function getVestingInfo(uint256 vestingId) 
-        external 
-        view 
-        returns (VestingSchedule memory schedule) 
-    {
+    function getVestingInfo(
+        uint256 vestingId
+    ) external view returns (VestingSchedule memory schedule) {
         return vestingSchedules[vestingId];
     }
 
     /// @notice Gets all vesting IDs for a user
     /// @param user User address
     /// @return vestingIds Array of vesting IDs
-    function getUserVestingIds(address user) 
-        external 
-        view 
-        returns (uint256[] memory vestingIds) 
-    {
+    function getUserVestingIds(
+        address user
+    ) external view returns (uint256[] memory vestingIds) {
         return userVestingIds[user];
     }
 
     /// @notice Gets the number of vesting schedules for a user
     /// @param user User address
     /// @return count Number of vesting schedules
-    function getUserVestingCount(address user) 
-        external 
-        view 
-        returns (uint256 count) 
-    {
+    function getUserVestingCount(
+        address user
+    ) external view returns (uint256 count) {
         return userVestingIds[user].length;
     }
 
     /// @notice Calculates total vested amount for a schedule
     /// @param vestingId The vesting schedule ID
     /// @return vested Total vested amount
-    function getVestedAmount(uint256 vestingId) 
-        external 
-        view 
-        returns (uint256 vested) 
-    {
+    function getVestedAmount(
+        uint256 vestingId
+    ) external view returns (uint256 vested) {
         VestingSchedule storage schedule = vestingSchedules[vestingId];
         if (schedule.beneficiary == address(0)) revert VestingNotFound();
-        
+
         return _calculateVested(schedule);
     }
 
     /// @notice Calculates claimable amount for a schedule
     /// @param vestingId The vesting schedule ID
     /// @return claimable Amount that can be claimed now
-    function getClaimableAmount(uint256 vestingId) 
-        external 
-        view 
-        returns (uint256 claimable) 
-    {
+    function getClaimableAmount(
+        uint256 vestingId
+    ) external view returns (uint256 claimable) {
         VestingSchedule storage schedule = vestingSchedules[vestingId];
         if (schedule.beneficiary == address(0)) revert VestingNotFound();
         if (schedule.revoked) return 0;
-        
+
         uint256 vested = _calculateVested(schedule);
         return vested - schedule.claimed;
     }
@@ -422,26 +431,28 @@ contract VestingManager is Ownable, ReentrancyGuard {
     /// @param user User address
     /// @return schedules Array of vesting schedules
     /// @return claimableAmounts Array of claimable amounts per schedule
-    function getUserVestings(address user) 
-        external 
-        view 
+    function getUserVestings(
+        address user
+    )
+        external
+        view
         returns (
             VestingSchedule[] memory schedules,
             uint256[] memory claimableAmounts
-        ) 
+        )
     {
         uint256[] memory vestingIds = userVestingIds[user];
         uint256 length = vestingIds.length;
-        
+
         schedules = new VestingSchedule[](length);
         claimableAmounts = new uint256[](length);
-        
+
         for (uint256 i = 0; i < length; i++) {
             uint256 vestingId = vestingIds[i];
             VestingSchedule storage schedule = vestingSchedules[vestingId];
-            
+
             schedules[i] = schedule;
-            
+
             if (!schedule.revoked) {
                 uint256 vested = _calculateVested(schedule);
                 claimableAmounts[i] = vested - schedule.claimed;
@@ -452,16 +463,14 @@ contract VestingManager is Ownable, ReentrancyGuard {
     /// @notice Gets total claimable amount across all user's vesting schedules
     /// @param user User address
     /// @return totalClaimable Total amount that can be claimed
-    function getTotalClaimable(address user) 
-        external 
-        view 
-        returns (uint256 totalClaimable) 
-    {
+    function getTotalClaimable(
+        address user
+    ) external view returns (uint256 totalClaimable) {
         uint256[] memory vestingIds = userVestingIds[user];
-        
+
         for (uint256 i = 0; i < vestingIds.length; i++) {
             VestingSchedule storage schedule = vestingSchedules[vestingIds[i]];
-            
+
             if (!schedule.revoked) {
                 uint256 vested = _calculateVested(schedule);
                 totalClaimable += (vested - schedule.claimed);
@@ -474,14 +483,12 @@ contract VestingManager is Ownable, ReentrancyGuard {
     /// @return totalVested Total amount currently vesting
     /// @return totalClaimed Total amount claimed
     /// @return balance Contract token balance
-    function getTokenStats(address token) 
-        external 
-        view 
-        returns (
-            uint256 totalVested,
-            uint256 totalClaimed,
-            uint256 balance
-        ) 
+    function getTokenStats(
+        address token
+    )
+        external
+        view
+        returns (uint256 totalVested, uint256 totalClaimed, uint256 balance)
     {
         totalVested = totalVestedAmount[token];
         totalClaimed = totalClaimedAmount[token];
@@ -491,26 +498,27 @@ contract VestingManager is Ownable, ReentrancyGuard {
     // ============================================
     // INTERNAL FUNCTIONS
     // ============================================
-    
-    /// @notice Calculates the vested amount for a schedule
-    /// @dev Uses linear vesting formula
-    /// @param schedule The vesting schedule
-    /// @return vested The vested amount
-    function _calculateVested(VestingSchedule memory schedule) 
-        internal 
-        view 
-        returns (uint256 vested) 
-    {
+
+    /**
+     * @notice Calculates the vested amount for a schedule
+     * @dev Uses linear vesting formula: vested = (amount * elapsed) / duration
+     * @custom:math If vesting hasn't started, returns 0. If complete, returns full amount.
+     * @param schedule The vesting schedule
+     * @return vested The vested amount
+     */
+    function _calculateVested(
+        VestingSchedule memory schedule
+    ) internal view returns (uint256 vested) {
         // If vesting hasn't started, return 0
         if (block.timestamp < schedule.start) {
             return 0;
         }
-        
+
         // If vesting is complete, return full amount
         if (block.timestamp >= schedule.start + schedule.duration) {
             return schedule.amount;
         }
-        
+
         // Linear vesting calculation
         uint256 elapsed = block.timestamp - schedule.start;
         vested = (schedule.amount * elapsed) / schedule.duration;

@@ -25,13 +25,17 @@ const config: HardhatUserConfig = {
       viaIR: true
     },
   },
+  defaultNetwork: 'hardhat',
   networks: {
     hardhat: {
-      chainId: 1337,
-      // forking: {
-      //   url: process.env.MAINNET_RPC_URL || "https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID",
-      //   blockNumber: process.env.FORK_BLOCK_NUMBER ? parseInt(process.env.FORK_BLOCK_NUMBER) : undefined,
-      // },
+      forking: {
+        enabled: false, // Enable forking for Ethereum mainnet
+        // Use Ethereum mainnet to access real Uniswap V2 Router
+        url: process.env.MAINNET_RPC_URL || "https://restless-ancient-mound.quiknode.pro/20fb2886d7e437de345ce39e98151180241816af/",
+        blockNumber: 18000000, // Ethereum mainnet block (Sep 2023 - after EIP-1559, has Uniswap V2)
+      },
+      // Explicitly set hardfork to support EIP-1559
+      hardfork: "london", // London hardfork introduced EIP-1559
     },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL,
@@ -55,30 +59,7 @@ const config: HardhatUserConfig = {
           apiKey: process.env.ETHERSCAN_API_KEY,
         },
       },
-    },
-    ecm: {
-      url: "https://rpc.testnet.ecmscan.io",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 1124,
     }
-  },
-
-
-  etherscan: {
-    enabled: true,
-    apiKey: {
-      ecm: "abc"
-    },
-    customChains: [
-      {
-        network: "ecm",
-        chainId: 1124,
-        urls: {
-          apiURL: "https://explorer.testnet.ecmscan.io/api/v1",
-          browserURL: "https://explorer.testnet.ecmscan.io",
-        }
-      }
-    ]
   },
 
   contractSizer: {
