@@ -20,14 +20,53 @@ This system enables users to purchase ECM tokens with USDT using referral codes,
 ### Five-Contract Design
 
 #### 1. PoolManager (Central Hub - 2221 lines)
-The main contract handling:
-- **Token Sales**: USDT → ECM purchases with Uniswap V2 pricing
-- **Auto-Staking**: Single-call `buyAndStake()` for seamless UX
-- **Reward Distribution**: Three strategies (LINEAR, MONTHLY, WEEKLY)
-- **Referral Integration**: Verifies vouchers and processes direct commissions
-- **Early Unstaking**: Configurable principal slashing (default 25%)
-- **Analytics**: Comprehensive on-chain metrics for users and admins
-- **Vesting Integration**: Automatic vesting schedule creation for rewards
+
+**PoolManager** is the core contract orchestrating ECM token sales, auto-staking, reward distribution, referral integration, liquidity management, and comprehensive analytics. It supports multiple independent pools with distinct reward strategies.
+
+**Key Features:**
+- **Token Sale & Auto-Staking**
+  - USDT→ECM purchases at Uniswap V2 spot price from reserves
+  - 500 ECM minimum purchase, all amounts must be multiples of 500
+  - Single-call UX: `buyAndStake()` combines purchase and staking atomically
+  - Slippage protection via `maxUsdtAmount` parameter
+  - Exact ECM purchase via `buyExactECMAndStake()`
+  - All purchased ECM is automatically staked (no idle balances)
+
+- **Three Reward Strategies**
+  - **LINEAR**: Constant reward rate per second (e.g., 1 ECM/sec)
+  - **MONTHLY**: Variable rates per month with automatic month progression
+  - **WEEKLY**: Variable rates per week with automatic week progression
+  - Uses canonical `accRewardPerShare` pattern (scaled by 1e18) for precision
+
+- **Referral System Integration**
+  - EIP-712 voucher verification via ReferralVoucher contract
+  - Direct commission processing (immediate or accrued) via ReferralModule
+  - Multi-level commission event recording for off-chain Merkle distribution
+  - Immutable referrer-buyer relationships with anti-gaming rules
+
+- **Early Unstaking with Penalties**
+  - Configurable principal slashing (default 25% = 2500 bps)
+  - Only principal is slashed; rewards remain intact
+  - Penalty receiver address (treasury/burn)
+  - Maturity check based on `stakeDuration`
+
+- **Optional Reward Vesting**
+  - Linear vesting via VestingManager integration
+  - Automatic vesting schedule creation on reward claims
+  - Configurable vesting duration per pool
+  - Pool-level or user-choice vesting modes
+
+- **Liquidity Management**
+  - Explicit ECM/USDT transfers to authorized LiquidityManager contracts
+  - Callback tracking for liquidity added to Uniswap V2
+  - Two-level accounting: moved to LiquidityManager vs actually added to Uniswap
+  - Never touches user-staked tokens (strict segregation)
+
+- **Comprehensive Analytics**
+  - 15+ view functions for real-time calculations
+  - APR/ROI/TVL calculations with price oracle integration
+  - Historical tracking: stakes, unstakes, penalties, rewards
+  - Pool-level and user-level analytics
 
 #### 2. ReferralVoucher (EIP-712 Verification - 247 lines)
 Off-chain voucher verification system:
@@ -240,48 +279,110 @@ await vestingManager.connect(user).claimVested(vestingIds[0]);
 ### Pool Struct
 ```solidity
 struct Pool {
-    // Core Configuration
-    uint32 id;
-    bool active;
-    IERC20 ecm;
-    IERC20 usdt;
-    IUniswapV2Pair pair;
+    // Core Identification
+    uint32 id;                      // Unique pool identifier
+    bool active;                    // Whether pool accepts new purchases/stakes
     
-    // Penalty Settings
-    uint16 penaltyBps;           // Default 2500 (25%)
-    address penaltyReceiver;     // Treasury for slashed tokens
+    // Token Configuration
+    IERC20 ecm;                     // ECM token contract
+    IERC20 usdt;                    // USDT payment token
+    IUniswapV2Pair pair;            // Uniswap V2 pair for pricing
     
-    // Token Allocation
-    uint256 allocatedForSale;    // ECM for public sale
-    uint256 allocatedForRewards; // ECM for staking rewards
-    uint256 sold;                // Total ECM sold
-    uint256 collectedUSDT;       // Total USDT collected
-    uint256 liquidityReserve;    // ECM reserved for liquidity
+    // Penalty Configuration
+    uint16 penaltyBps;              // Early unstake penalty (2500 = 25%)
+    address penaltyReceiver;        // Receives slashed tokens
+    
+    // Token Allocation & Sale Tracking
+    uint256 allocatedForSale;       // ECM allocated for public sale
+    uint256 allocatedForRewards;    // ECM allocated for staking rewards
+    uint256 sold;                   // Total ECM sold to users
+    uint256 collectedUSDT;          // Total USDT collected from sales
     
     // Staking State
-    uint256 totalStaked;         // Current total staked
-    uint256 accRewardPerShare;   // Accumulated rewards per share (scaled 1e18)
-    uint256 lastRewardTime;      // Last reward update timestamp
-    uint256 totalRewardsAccrued; // Total rewards accrued (for capping)
+    uint256 totalStaked;            // Total ECM currently staked (equals sold)
     
-    // Reward Strategy
-    RewardStrategy rewardStrategy; // LINEAR or MONTHLY
-    uint256 rewardRatePerSecond;   // For LINEAR
-    uint256[] monthlyRewards;      // For MONTHLY
-    uint256 monthlyRewardIndex;    // Current month index
-    uint256 monthlyRewardStart;    // Month tracking start time
+    // Reward Distribution (accRewardPerShare Pattern)
+    uint256 accRewardPerShare;      // Accumulated rewards per share (scaled 1e18)
+    uint256 lastRewardTime;         // Last reward update timestamp
     
-    // Vesting
-    uint256 vestingDuration;
-    bool vestRewardsByDefault;
+    // Reward Strategy Configuration
+    RewardStrategy rewardStrategy;  // LINEAR, MONTHLY, or WEEKLY
+    uint256 rewardRatePerSecond;    // For LINEAR strategy
     
-    // Analytics
-    uint256 poolCreatedAt;
-    uint256 totalPenaltiesCollected;
-    uint256 peakTotalStaked;
-    uint256 totalUniqueStakers;
-    uint256 lifetimeStakeVolume;
-    uint256 lifetimeUnstakeVolume;
+    // Staking Duration Rules
+    uint256[] allowedStakeDurations; // e.g., [30 days, 90 days, 180 days]
+    uint256 maxDuration;             // Maximum staking duration
+    
+    // Vesting Configuration
+    uint256 vestingDuration;         // Linear vesting period for rewards
+    bool vestRewardsByDefault;       // Auto-vest vs user choice
+    
+    // Monthly/Weekly Reward Data
+    uint256[] monthlyRewards;        // Monthly reward schedule
+    uint256 monthlyRewardIndex;      // Current month index
+    uint256 monthlyRewardStart;      // Month tracking start time
+    uint256[] weeklyRewards;         // Weekly reward schedule
+    uint256 weeklyRewardIndex;       // Current week index
+    uint256 weeklyRewardStart;       // Week tracking start time
+    
+    // Liquidity Tracking (Two-Level)
+    uint256 liquidityPoolOwedECM;   // Net ECM in LiquidityManager
+    uint256 ecmMovedToLiquidity;    // ECM transferred to LiquidityManager
+    uint256 usdtMovedToLiquidity;   // USDT transferred to LiquidityManager
+    uint256 ecmAddedToUniswap;      // ECM added to Uniswap (via callback)
+    uint256 usdtAddedToUniswap;     // USDT added to Uniswap (via callback)
+    
+    // Vesting & Rewards Tracking
+    uint256 ecmVested;              // ECM sent to VestingManager
+    uint256 rewardsPaid;            // Total rewards paid (immediate + vested)
+    uint256 totalRewardsAccrued;    // Total rewards accrued (for capping)
+    
+    // Historical & Analytics
+    uint256 poolCreatedAt;          // Pool creation timestamp
+    uint256 totalPenaltiesCollected; // ECM from early unstakes
+    uint256 peakTotalStaked;        // Highest totalStaked reached
+    uint256 totalUniqueStakers;     // Unique staker count
+    uint256 lifetimeStakeVolume;    // Cumulative ECM staked
+    uint256 lifetimeUnstakeVolume;  // Cumulative ECM unstaked
+}
+```
+
+### UserInfo Struct
+```solidity
+struct UserInfo {
+    uint256 bought;              // Total ECM purchased (historical)
+    uint256 staked;              // Currently staked ECM
+    uint256 stakeStart;          // Current stake start timestamp
+    uint256 stakeDuration;       // Selected lock duration
+    
+    // Reward Calculation (accRewardPerShare Pattern)
+    uint256 rewardDebt;          // Reward debt for calculation
+    uint256 pendingRewards;      // Accumulated unclaimed rewards
+    
+    // Historical & Analytics
+    bool hasStaked;              // Ever staked in pool flag
+    uint256 totalStaked;         // Lifetime total staked
+    uint256 totalUnstaked;       // Lifetime total unstaked
+    uint256 totalRewardsClaimed; // Lifetime rewards claimed
+    uint256 totalPenaltiesPaid;  // Total penalties paid
+    uint256 firstStakeTimestamp; // First stake timestamp
+    uint256 lastActionTimestamp; // Last action timestamp
+}
+```
+
+### PoolCreateParams Struct
+```solidity
+struct PoolCreateParams {
+    address ecm;                     // ECM token address
+    address usdt;                    // USDT token address
+    address pair;                    // Uniswap V2 pair address
+    address penaltyReceiver;         // Penalty receiver address
+    RewardStrategy rewardStrategy;   // LINEAR, MONTHLY, or WEEKLY
+    uint256[] allowedStakeDurations; // Allowed lock periods
+    uint256 maxDuration;             // Maximum staking duration
+    uint256 vestingDuration;         // Vesting duration (0 = none)
+    bool vestRewardsByDefault;       // Auto-vest flag
+    uint16 penaltyBps;               // Penalty in bps (0 = use default)
 }
 ```
 
@@ -321,20 +422,20 @@ function createPool(PoolCreateParams calldata params) external onlyOwner returns
 function allocateForSale(uint256 poolId, uint256 amount) external onlyOwner
 function allocateForRewards(uint256 poolId, uint256 amount) external onlyOwner
 
-// Set liquidity reserve
-function setLiquidityReserve(uint256 poolId, uint256 amount) external onlyOwner
-
 // Activate/deactivate pool
 function setPoolActive(uint256 poolId, bool active) external onlyOwner
 ```
 
 #### Reward Configuration
 ```solidity
-// LINEAR strategy
-function setLinearRewardRate(uint256 poolId, uint256 rewardRatePerSecond) external onlyOwner
+// LINEAR strategy - automatically calculates rate based on maxDuration
+function setLinearRewardRate(uint256 poolId) external onlyOwner
 
 // MONTHLY strategy
 function setMonthlyRewards(uint256 poolId, uint256[] calldata monthlyAmounts) external onlyOwner
+
+// WEEKLY strategy
+function setWeeklyRewards(uint256 poolId, uint256[] calldata weeklyAmounts) external onlyOwner
 
 // Update staking rules
 function setAllowedStakeDurations(uint256 poolId, uint256[] calldata durations) external onlyOwner
@@ -347,6 +448,12 @@ function setVestingConfig(uint256 poolId, uint256 vestingDuration, bool vestByDe
 // Set VestingManager
 function setVestingManager(address _vestingManager) external onlyOwner
 
+// Set ReferralVoucher
+function setReferralVoucher(address _referralVoucher) external onlyOwner
+
+// Set ReferralModule
+function setReferralModule(address _referralModule) external onlyOwner
+
 // Authorize LiquidityManager
 function addAuthorizedLiquidityManager(address manager) external onlyOwner
 function removeAuthorizedLiquidityManager(address manager) external onlyOwner
@@ -358,25 +465,49 @@ function transferToLiquidityManager(
     uint256 ecmAmount,
     uint256 usdtAmount
 ) external onlyOwner
+
+// Callback from LiquidityManager (called by authorized contracts)
+function recordLiquidityAdded(
+    uint256 poolId,
+    uint256 ecmAmount,
+    uint256 usdtAmount
+) external
+
+// Refill pool from LiquidityManager (called by authorized contracts)
+function refillPoolManager(uint256 poolId, uint256 ecmAmount) external
+```
+
+#### Emergency & Governance
+```solidity
+// Emergency token recovery
+function emergencyRecoverTokens(address token, uint256 amount, address to) external onlyOwner
+
+// Pause/unpause operations
+function pause() external onlyOwner
+function unpause() external onlyOwner
 ```
 
 ### User Functions
 
 #### Buying & Staking
 ```solidity
-// Buy with max USDT amount
+// Buy with max USDT amount (referral optional)
 function buyAndStake(
     uint256 poolId,
     uint256 maxUsdtAmount,
-    uint256 selectedStakeDuration
+    uint256 selectedStakeDuration,
+    IReferralVoucher.VoucherInput calldata voucherInput,
+    bytes calldata voucherSignature
 ) external nonReentrant whenNotPaused
 
-// Buy exact ECM amount
+// Buy exact ECM amount (referral optional)
 function buyExactECMAndStake(
     uint256 poolId,
     uint256 exactEcmAmount,
     uint256 maxUsdtAmount,
-    uint256 selectedStakeDuration
+    uint256 selectedStakeDuration,
+    IReferralVoucher.VoucherInput calldata voucherInput,
+    bytes calldata voucherSignature
 ) external nonReentrant whenNotPaused
 ```
 
@@ -403,35 +534,87 @@ function pendingRewards(uint256 poolId, address user) public view returns (uint2
 ```solidity
 // Get spot price from Uniswap
 function getPriceSpot(uint256 poolId) public view returns (
-    uint256 usdtPerEcm,    // Price in USDT per ECM
-    uint256 reserveECM,
-    uint256 reserveUSDT
+    uint256 usdtPerEcm,    // Price in USDT per ECM (scaled by 1e18)
+    uint256 reserveECM,    // ECM reserve in pair
+    uint256 reserveUSDT    // USDT reserve in pair
 )
 
 // Estimate costs
-function getRequiredUSDTForExactECM(uint256 poolId, uint256 exactEcm) external view returns (uint256)
-function estimateECMForUSDT(uint256 poolId, uint256 usdtAmount) external view returns (uint256)
+function getRequiredUSDTForExactECM(uint256 poolId, uint256 exactEcm) external view returns (uint256 usdtRequired)
+function estimateECMForUSDT(uint256 poolId, uint256 usdtAmount) external view returns (uint256 ecmEstimate)
+
+// Pool balance breakdown
+function getPoolBalanceStatus(uint256 poolId) external view returns (
+    uint256 totalAllocated,
+    uint256 soldToUsers,
+    uint256 currentlyStaked,
+    uint256 movedToLiquidity,
+    uint256 liquidityOwedECM,
+    uint256 addedToUniswap,
+    uint256 vested,
+    uint256 rewardsPaid,
+    uint256 availableInContract,
+    uint256 deficit
+)
 ```
 
 #### Analytics
 ```solidity
-// APR calculations
-function calculateAPR(uint256 poolId) external view returns (uint256 apr)
-function calculateMonthlyAPR(uint256 poolId, uint256 monthsToProject) external view returns (uint256)
+// APR calculation (works for all strategies: LINEAR, MONTHLY, WEEKLY)
+// periodsToProject: years for LINEAR (scaled 1e18), months for MONTHLY, weeks for WEEKLY
+function calculateAPR(uint256 poolId, uint256 periodsToProject) public view returns (uint256 apr)
 
 // User projections
-function calculateExpectedRewards(uint256 poolId, address user, uint256 durationSeconds) external view returns (uint256)
-function calculateROI(uint256 poolId, address user, uint256 durationSeconds, uint256 ecmPriceInUsdt) external view returns (uint256)
+function calculateExpectedRewards(
+    uint256 poolId,
+    address user,
+    uint256 durationSeconds
+) external view returns (uint256 expectedRewards)
+
+function calculateROI(
+    uint256 poolId,
+    address user,
+    uint256 durationSeconds,
+    uint256 ecmPriceInUsdt
+) external view returns (uint256 roi)
 
 // Pool metrics
-function calculateTVL(uint256 poolId, uint256 ecmPriceInUsdt) external view returns (uint256)
-function calculateUtilizationRate(uint256 poolId) external view returns (uint256)
-function calculateRewardDepletionTime(uint256 poolId) external view returns (uint256, uint256, bool)
+function calculateTVL(uint256 poolId, uint256 ecmPriceInUsdt) external view returns (uint256 tvl)
+function calculateUtilizationRate(uint256 poolId) external view returns (uint256 utilizationRate)
+function calculateRewardDepletionTime(uint256 poolId) external view returns (
+    uint256 depletionTimestamp,
+    uint256 daysRemaining,
+    bool isInfinite
+)
 
 // Comprehensive analytics
-function getPoolAnalytics(uint256 poolId, uint256 ecmPriceInUsdt) external view returns (...)
-function getUserAnalytics(uint256 poolId, address user) external view returns (...)
-function calculateUnstakePenalty(uint256 poolId, address user) external view returns (...)
+function getPoolAnalytics(uint256 poolId, uint256 ecmPriceInUsdt) external view returns (
+    uint256 poolAge,
+    uint256 totalUniqueStakers,
+    uint256 totalPenaltiesCollected,
+    uint256 peakTotalStaked,
+    uint256 lifetimeStakeVolume,
+    uint256 lifetimeUnstakeVolume,
+    uint256 currentTVL
+)
+
+function getUserAnalytics(uint256 poolId, address user) external view returns (
+    bool hasStaked,
+    uint256 firstStakeTimestamp,
+    uint256 lastActionTimestamp,
+    uint256 totalStaked,
+    uint256 totalUnstaked,
+    uint256 totalRewardsClaimed,
+    uint256 totalPenaltiesPaid,
+    uint256 accountAge
+)
+
+function calculateUnstakePenalty(uint256 poolId, address user) external view returns (
+    bool willBePenalized,
+    uint256 penaltyAmount,
+    uint256 amountReceived,
+    uint256 timeUntilMaturity
+)
 ```
 
 ---
