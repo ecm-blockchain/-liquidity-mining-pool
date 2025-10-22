@@ -41,7 +41,7 @@ const ECM_LiquidityMining_Module = buildModule("ECM_LiquidityMining_Module", (m)
   const penaltyReceiver = m.getParameter("penaltyReceiver", m.getAccount(0));
 
   if (createInitialPool) {
-    // Approve ECM for sale, rewards, liquidity
+    // Allocate ECM for sale and rewards (liquidityAmount will be transferred separately to LiquidityManager)
     m.call(ecmToken, "approve", [poolManager, saleAmount + rewardAmount + liquidityAmount]);
     m.call(usdtToken, "approve", [poolManager, liquidityUsdtAmount]);
 
@@ -57,12 +57,11 @@ const ECM_LiquidityMining_Module = buildModule("ECM_LiquidityMining_Module", (m)
       true // vestRewardsByDefault
     ]);
 
-    // Allocate ECM for sale, rewards, liquidity
+    // Allocate ECM for sale and rewards
     m.call(poolManager, "allocateForSale", [0, saleAmount]);
     m.call(poolManager, "allocateForRewards", [0, rewardAmount]);
-    m.call(poolManager, "setLiquidityReserve", [0, liquidityAmount]);
     // Configure reward strategy (example: LINEAR)
-    m.call(poolManager, "setLinearRewardRate", [0, parseEther("0.01")]);
+    m.call(poolManager, "setLinearRewardRate", [0]);
     // Activate pool
     m.call(poolManager, "setPoolActive", [0, true]);
   }

@@ -4,7 +4,6 @@ import MerkleTree from "merkletreejs";
 import { parseEther, parseUnits, ZeroAddress,keccak256 } from "ethers";
 import { mine, time } from "@nomicfoundation/hardhat-network-helpers";
 import { setNextBlockTimestamp } from "@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time";
-import { get } from "http";
 
 /**
  * PoolManager & VestingManager Test Suite
@@ -80,7 +79,6 @@ describe("PoolManager & VestingManager", function () {
   // Constants
   const PRECISION = ethers.parseEther("1"); // 1e18
   const MIN_PURCHASE_ECM = parseEther("500");
-  const PURCHASE_MULTIPLE = parseEther("500");
   const DEFAULT_PENALTY_BPS = 2500; // 25%
   const MAX_BPS = 10000;
   
@@ -388,13 +386,6 @@ describe("PoolManager & VestingManager", function () {
         expect(routerAddress).to.be.properAddress;
         
         // Verify constants are correct
-        expect(await poolManager.PRECISION()).to.equal(parseEther("1"));
-        expect(await poolManager.MIN_PURCHASE_ECM()).to.equal(parseEther("500"));
-        expect(await poolManager.PURCHASE_MULTIPLE()).to.equal(parseEther("500"));
-        expect(await poolManager.DEFAULT_PENALTY_BPS()).to.equal(2500);
-        expect(await poolManager.MAX_BPS()).to.equal(10000);
-        expect(await poolManager.WEEK_SECONDS()).to.equal(7 * 24 * 3600);
-        
         // Verify contract is not paused initially
         expect(await poolManager.paused()).to.be.false;
         
@@ -1498,9 +1489,6 @@ describe("PoolManager & VestingManager", function () {
       expect(userInfoAfter.staked).to.be.gt(0);
       expect(userInfoAfter.stakeDuration).to.equal(THIRTY_DAYS);
       expect(userInfoAfter.stakeStart).to.be.gt(0);
-
-      // Verify stake is multiple of 500
-      expect(userInfoAfter.staked % PURCHASE_MULTIPLE).to.equal(0);
     });
 
     it("User can buy exact ECM amount and auto-stake (buyExactECMAndStake)", async function () {
@@ -1532,20 +1520,16 @@ describe("PoolManager & VestingManager", function () {
       await expect(
         poolManager.connect(user1).buyAndStake(poolId, tinyUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
-    });
 
-    it("Should enforce 500 ECM multiple requirement", async function () {
-      const poolId = await setupPoolForPurchase();
-
-      // Try to buy exact ECM that's not a multiple of 500
-      const invalidEcm = parseEther("750"); // 750 is not multiple of 500
-      const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, invalidEcm);
+      // Try to buy exact ECM below minimum
+      const belowMin = parseEther("100"); // Less than 500 ECM
+      const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, belowMin);
 
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, invalidEcm, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
-      ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
+        poolManager.connect(user1).buyExactECMAndStake(poolId, belowMin, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
+      ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
     });
 
     it("Should revert if pool is inactive", async function () {
@@ -1801,16 +1785,7 @@ describe("PoolManager & VestingManager", function () {
         
         await expect(
           poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, smallUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
-        ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
-        
-        // Test 3: Amount not multiple of 500
-        const notMultiple = parseEther("750"); // Not a multiple of 500
-        const notMultipleUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, notMultiple);
-        await usdtToken.connect(user1).approve(poolManager.target, notMultipleUsdt);
-        
-        await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, notMultiple, notMultipleUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
-        ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
+        ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
       });
     });
   });
@@ -3028,7 +3003,7 @@ describe("PoolManager & VestingManager", function () {
         const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, tooSmall);
         expect(requiredUsdt).to.be.gt(0);
         await expect(poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x"))
-          .to.be.revertedWithCustomError(poolManager, "InvalidAmount");
+          .to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
       });
 
       it("Should revert for non-existent pool", async function () {

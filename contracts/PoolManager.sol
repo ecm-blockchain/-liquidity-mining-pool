@@ -37,7 +37,6 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_PURCHASE_ECM = 500 ether; // 500 ECM minimum
-    uint256 public constant PURCHASE_MULTIPLE = 500 ether; // Must be multiple of 500
     uint256 public constant DEFAULT_PENALTY_BPS = 2500; // 25% slash
     uint256 public constant MAX_BPS = 10000;
 
@@ -753,11 +752,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         _updatePoolRewards(poolId);
 
         // Get price and calculate ECM amount
-        uint256 ecmRaw = _getECMAmountOut(poolId, maxUsdtAmount);
+        uint256 ecmToAllocate = _getECMAmountOut(poolId, maxUsdtAmount);
 
-        // Floor to 500 ECM multiple
-        uint256 ecmToAllocate = (ecmRaw / PURCHASE_MULTIPLE) *
-            PURCHASE_MULTIPLE;
+        // Check minimum purchase
         if (ecmToAllocate < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
 
         // Check pool inventory
@@ -854,7 +851,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Buy exact ECM amount and auto-stake
     /// @param poolId The pool ID
-    /// @param exactEcmAmount Exact ECM amount to buy (must be multiple of 500)
+    /// @param exactEcmAmount Exact ECM amount to buy (minimum 500 ECM)
     /// @param maxUsdtAmount Maximum USDT willing to spend
     /// @param selectedStakeDuration Selected staking duration
     /// @param voucherInput Referral voucher data (optional - use zero values if no referral)
@@ -869,7 +866,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     ) external nonReentrant whenNotPaused {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (exactEcmAmount == 0) revert InvalidAmount();
-        if (exactEcmAmount % PURCHASE_MULTIPLE != 0) revert InvalidAmount();
+        if (exactEcmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
 
         Pool storage pool = pools[poolId];
         if (!pool.active) revert PoolNotActive();
