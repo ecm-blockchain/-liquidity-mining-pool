@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 /// @title ReferralModule - Multi-Level Referral System with Direct & Reward-Based Commissions
-/// @notice Handles referral code registration, direct commission payments, and off-chain calculated multi-level reward commissions via Merkle proofs
+/// @notice Handles referral tracking, direct commission payments, and off-chain calculated multi-level reward commissions via Merkle proofs
 /// @dev Two-tier commission system:
 ///      1. Direct Commission: Paid immediately when buyer stakes (based on staked amount)
 ///      2. Multi-Level Reward Commission: Calculated off-chain when rewards claimed, distributed via Merkle claim
@@ -40,22 +40,17 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // STATE VARIABLES
     // ============================================
 
-    // Global commission configuration
-    uint8 public commissionLevels;
-    uint16[] public commissionBps; // [L1, L2, ...]
-    uint16 public directBps; // Direct commission (for staked amount)
-    bool public transferOnUse; // If true, transfer direct commission immediately; else accrue
-
-    // EIP-712 domain separator
-    bytes32 public DOMAIN_SEPARATOR;
-    bytes32 public constant VOUCHER_TYPEHASH = keccak256("ReferralVoucher(string code,address referrer,uint256 nonce)");
-    mapping(address => uint256) public nonces; // Nonce per user for replay protection
+    // Pool-level multi-level commission configuration
+    mapping(uint256 => uint16[]) public poolLevelConfig; // poolId => [L1_bps, L2_bps, ...]
 
     // Buyer → Referrer mapping
     mapping(address => address) public referrerOf;
 
     // Accrued direct commissions
     mapping(address => uint256) public directAccrued;
+
+    // Token address for accrued commissions (referrer => token)
+    mapping(address => address) public accruedToken;
 
     // Merkle roots for reward commission epochs
     mapping(uint256 => ReferralPayoutRoot) public payoutRoots;
@@ -74,12 +69,12 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // EVENTS
     // ============================================
 
-    event CommissionConfigUpdated(uint8 levels, uint16[] bps, uint16 directBps, bool transferOnUse);
-    event ReferrerLinked(address indexed buyer, address indexed referrer, string code);
-    event DirectCommissionPaid(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, string code);
-    event DirectCommissionAccrued(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, string code);
+    event PoolLevelConfigSet(uint256 indexed poolId, uint16[] mlBps);
+    event ReferrerLinked(address indexed buyer, address indexed referrer, bytes32 codeHash);
+    event DirectCommissionPaid(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, bytes32 codeHash);
+    event DirectCommissionAccrued(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, bytes32 codeHash);
     event DirectAccrualWithdrawn(address indexed referrer, uint256 amount, address indexed to);
-    event RewardClaimRecorded(address indexed claimant, uint256 indexed poolId, uint256 rewardAmount, bytes32 indexed claimTxHash);
+    event RewardClaimRecorded(address indexed claimant, uint256 indexed poolId, uint256 rewardAmount, uint256 timestamp);
     event ReferralPayoutRootSubmitted(uint256 indexed epochId, bytes32 indexed root, address token, uint256 totalAmount, uint64 expiry);
     event ReferralPayoutClaimed(uint256 indexed epochId, address indexed claimer, address token, uint256 amount);
     event UnclaimedFundsWithdrawn(uint256 indexed epochId, address indexed to, uint256 amount);
@@ -111,7 +106,7 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // ============================================
 
     modifier onlyPoolManager() {
-        if (msg.sender != poolManager) revert UnauthorizedCaller();
+        if (msg.sender != poolManager && msg.sender != owner()) revert UnauthorizedCaller();
         _;
     }
 
@@ -119,21 +114,7 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // CONSTRUCTOR
     // ============================================
 
-    constructor() Ownable(msg.sender) {
-        uint256 chainId;
-        assembly {
-            chainId := chainid()
-        }
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes("ReferralModule")),
-                keccak256(bytes("1")),
-                chainId,
-                address(this)
-            )
-        );
-    }
+    constructor() Ownable(msg.sender) {}
 
     // ============================================
     // ADMIN FUNCTIONS - CONFIGURATION
@@ -146,107 +127,108 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         emit PoolManagerSet(_poolManager);
     }
 
-    /// @notice Sets the global commission configuration
-    function setCommissionConfig(uint8 levels, uint16[] calldata bps, uint16 _directBps, bool _transferOnUse) external onlyOwner {
-        if (levels == 0 || levels > MAX_LEVELS) revert InvalidConfig();
-        if (bps.length != levels) revert InvalidConfig();
+    /// @notice Sets the multi-level commission configuration for a pool
+    /// @param poolId Pool ID
+    /// @param mlBps Array of commission percentages per level [L1, L2, ...]
+    function setPoolLevelConfig(uint256 poolId, uint16[] calldata mlBps) external onlyOwner {
+        if (mlBps.length == 0 || mlBps.length > MAX_LEVELS) revert InvalidConfig();
         uint256 totalMLBps = 0;
-        for (uint i = 0; i < bps.length; i++) {
-            totalMLBps += bps[i];
+        for (uint i = 0; i < mlBps.length; i++) {
+            totalMLBps += mlBps[i];
         }
         if (totalMLBps > BPS_DENOM / 2) revert InvalidConfig(); // Max 50%
-        if (_directBps > BPS_DENOM / 5) revert InvalidConfig(); // Max 20%
-        commissionLevels = levels;
-        delete commissionBps;
-        for (uint i = 0; i < bps.length; i++) {
-            commissionBps.push(bps[i]);
+        delete poolLevelConfig[poolId];
+        for (uint i = 0; i < mlBps.length; i++) {
+            poolLevelConfig[poolId].push(mlBps[i]);
         }
-        directBps = _directBps;
-        transferOnUse = _transferOnUse;
-        emit CommissionConfigUpdated(levels, bps, _directBps, _transferOnUse);
+        emit PoolLevelConfigSet(poolId, mlBps);
     }
 
     // ============================================
     // INTEGRATION FUNCTIONS - CALLED BY POOLMANAGER
     // ============================================
 
-    /// @notice Uses an EIP-712 signed voucher to link buyer to referrer and pay/accrue direct commission
-    /// @param code Referral code string
-    /// @param referrer Referrer address
+    /// @notice Records purchase and pays/accrues direct commission (called by PoolManager after voucher verification)
+    /// @param codeHash Hash of the referral code
+    /// @param buyer Buyer address
+    /// @param referrer Referrer address (from voucher)
     /// @param poolId Pool ID
     /// @param stakedAmount Amount of ECM staked
     /// @param token ECM token address
-    /// @param signature EIP-712 signature from authorized issuer
-    function useReferralVoucher(
-        string calldata code,
+    /// @param directBps Direct commission rate from voucher
+    /// @param transferOnUse If true, transfer immediately; else accrue
+    /// @return directAmount Amount of direct commission
+    function recordPurchaseAndPayDirect(
+        bytes32 codeHash,
+        address buyer,
         address referrer,
         uint256 poolId,
         uint256 stakedAmount,
         address token,
-        bytes calldata signature
-    ) external onlyPoolManager nonReentrant returns (address, uint256) {
-        // EIP-712 verification
-        uint256 nonce = nonces[msg.sender];
-        bytes32 structHash = keccak256(abi.encode(VOUCHER_TYPEHASH, keccak256(bytes(code)), referrer, nonce));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-        address signer = recoverSigner(digest, signature);
-        if (signer != owner()) revert InvalidSignature();
-
+        uint16 directBps,
+        bool transferOnUse
+    ) external onlyPoolManager nonReentrant returns (uint256 directAmount) {
+        // Validate directBps is not greater than 100%
+        if (directBps > BPS_DENOM) revert InvalidConfig();
+        
         // Prevent self-referral
-        if (msg.sender == referrer) revert SelfReferral();
+        if (buyer == referrer) revert SelfReferral();
         // Prevent cyclic referrals (2-person loop)
-        if (referrerOf[referrer] == msg.sender) revert CyclicReferral();
+        if (referrerOf[referrer] == buyer) revert CyclicReferral();
 
         // Set referrer relationship (only on first purchase)
-        if (referrerOf[msg.sender] == address(0)) {
-            referrerOf[msg.sender] = referrer;
-            emit ReferrerLinked(msg.sender, referrer, code);
+        if (referrerOf[buyer] == address(0)) {
+            referrerOf[buyer] = referrer;
+            emit ReferrerLinked(buyer, referrer, codeHash);
         } else {
-            if (referrerOf[msg.sender] != referrer) revert ReferrerAlreadySet();
+            if (referrerOf[buyer] != referrer) revert ReferrerAlreadySet();
         }
 
-        nonces[msg.sender]++;
-
         // Calculate direct commission
-        uint256 directAmount = (stakedAmount * directBps) / BPS_DENOM;
+        directAmount = (stakedAmount * directBps) / BPS_DENOM;
         if (directAmount > 0) {
             if (transferOnUse) {
                 uint256 contractBalance = IERC20(token).balanceOf(address(this));
                 if (contractBalance < directAmount) revert InsufficientBalance();
                 IERC20(token).safeTransfer(referrer, directAmount);
                 totalDirectPaid += directAmount;
-                emit DirectCommissionPaid(referrer, msg.sender, poolId, stakedAmount, directAmount, code);
+                emit DirectCommissionPaid(referrer, buyer, poolId, stakedAmount, directAmount, codeHash);
             } else {
                 directAccrued[referrer] += directAmount;
-                emit DirectCommissionAccrued(referrer, msg.sender, poolId, stakedAmount, directAmount, code);
+                accruedToken[referrer] = token; // Store token address for withdrawal
+                emit DirectCommissionAccrued(referrer, buyer, poolId, stakedAmount, directAmount, codeHash);
             }
         }
-        return (referrer, directAmount);
+        return directAmount;
     }
 
-    /// @dev Recovers signer from EIP-712 signature
-    function recoverSigner(bytes32 digest, bytes memory signature) public pure returns (address) {
-        if (signature.length != 65) return address(0);
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := mload(add(signature, 32))
-            s := mload(add(signature, 64))
-            v := byte(0, mload(add(signature, 96)))
+    /// @notice Alternative: Just link referrer (if PoolManager paid direct commission itself)
+    /// @param buyer Buyer address
+    /// @param referrer Referrer address
+    /// @param codeHash Hash of the referral code
+    function linkReferrer(
+        address buyer,
+        address referrer,
+        bytes32 codeHash
+    ) external onlyPoolManager {
+        if (buyer == referrer) revert SelfReferral();
+        if (referrerOf[referrer] == buyer) revert CyclicReferral();
+        if (referrerOf[buyer] == address(0)) {
+            referrerOf[buyer] = referrer;
+            emit ReferrerLinked(buyer, referrer, codeHash);
+        } else {
+            if (referrerOf[buyer] != referrer) revert ReferrerAlreadySet();
         }
-        if (v < 27) v += 27;
-        return ecrecover(digest, v, r, s);
     }
 
     /// @notice Records a reward claim event (for off-chain engine)
+    /// @dev Off-chain engine can get tx hash from event receipt; timestamp provides ordering
     function recordRewardClaimEvent(
         address claimant,
         uint256 poolId,
-        uint256 rewardAmount,
-        bytes32 claimTxHash
+        uint256 rewardAmount
     ) external onlyPoolManager {
-        emit RewardClaimRecorded(claimant, poolId, rewardAmount, claimTxHash);
+        emit RewardClaimRecorded(claimant, poolId, rewardAmount, block.timestamp);
     }
 
     // ============================================
@@ -327,7 +309,7 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     /// @param token Token address (must match epoch)
     /// @param amount Amount to claim
     /// @param proof Merkle proof
-    function claimPayout(
+    function claimReferral(
         uint256 epochId,
         address token,
         uint256 amount,
@@ -365,19 +347,16 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     function withdrawDirectAccrual(uint256 amount) external nonReentrant {
         uint256 accrued = directAccrued[msg.sender];
         if (accrued == 0) revert InvalidAmount();
+        
         uint256 toWithdraw = amount == 0 ? accrued : amount;
         if (toWithdraw > accrued) revert InvalidAmount();
+        
+        // Get stored token address
+        address token = accruedToken[msg.sender];
+        if (token == address(0)) revert InvalidAddress();
+        
         directAccrued[msg.sender] = accrued - toWithdraw;
-        // Transfer tokens from contract balance
-        IERC20 payoutToken = IERC20(address(0));
-        for (uint256 i = 0; i < 256; i++) {
-            if (payoutRoots[i].funded && payoutRoots[i].token != address(0)) {
-                payoutToken = IERC20(payoutRoots[i].token);
-                break;
-            }
-        }
-        require(address(payoutToken) != address(0), "No payout token set");
-        payoutToken.safeTransfer(msg.sender, toWithdraw);
+        IERC20(token).safeTransfer(msg.sender, toWithdraw);
         emit DirectAccrualWithdrawn(msg.sender, toWithdraw, msg.sender);
     }
 
@@ -393,16 +372,13 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         uint256 accrued = directAccrued[referrer];
         if (accrued == 0 || amount > accrued) revert InvalidAmount();
         if (to == address(0)) revert InvalidAddress();
+        
+        // Get stored token address
+        address token = accruedToken[referrer];
+        if (token == address(0)) revert InvalidAddress();
+        
         directAccrued[referrer] = accrued - amount;
-        IERC20 payoutToken = IERC20(address(0));
-        for (uint256 i = 0; i < 256; i++) {
-            if (payoutRoots[i].funded && payoutRoots[i].token != address(0)) {
-                payoutToken = IERC20(payoutRoots[i].token);
-                break;
-            }
-        }
-        require(address(payoutToken) != address(0), "No payout token set");
-        payoutToken.safeTransfer(to, amount);
+        IERC20(token).safeTransfer(to, amount);
         emit DirectAccrualWithdrawn(referrer, amount, to);
     }
 
@@ -470,8 +446,18 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     }
 
     /// @notice Calculates expected direct commission for a staked amount
-    function calculateDirectCommission(uint256 stakedAmount) external view returns (uint256) {
+    /// @param stakedAmount Staked amount
+    /// @param directBps Direct commission rate
+    /// @return Expected direct commission
+    function calculateDirectCommission(uint256 stakedAmount, uint16 directBps) external pure returns (uint256) {
         return (stakedAmount * directBps) / BPS_DENOM;
+    }
+
+    /// @notice Gets pool-level multi-level commission configuration
+    /// @param poolId Pool ID
+    /// @return mlBps Array of commission percentages per level
+    function getPoolLevelConfig(uint256 poolId) external view returns (uint16[] memory mlBps) {
+        return poolLevelConfig[poolId];
     }
 
     /// @notice Gets referral chain for a buyer (for off-chain use)

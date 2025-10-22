@@ -3,41 +3,63 @@
 
 ## Overview
 
-This repository contains a comprehensive **three-contract architecture** for ECM token sale, staking, reward distribution, and liquidity management:
+This repository contains a comprehensive **five-contract architecture** for ECM token sale, staking, reward distribution, referral system, and liquidity management:
 
-- **PoolManager** - Core contract for token sales (USDT→ECM), auto-staking, and reward distribution
-- **LiquidityManager** - Dedicated Uniswap V2 liquidity operations handler
+- **PoolManager** - Core contract for token sales (USDT→ECM), auto-staking, reward distribution, and referral integration
+- **ReferralVoucher** - EIP-712 signature verification for off-chain referral codes
+- **ReferralModule** - Two-tier commission system (Direct + Multi-level Merkle distribution)
 - **VestingManager** - Linear vesting schedules for reward claims
+- **LiquidityManager** - Dedicated Uniswap V2 liquidity operations handler
 
-This system enables users to purchase ECM tokens with USDT, automatically stake them, earn rewards (LINEAR or MONTHLY strategies), and optionally vest rewards over time. The architecture provides enterprise-grade features with mathematical precision and security.
+This system enables users to purchase ECM tokens with USDT using referral codes, automatically stake them, earn rewards (LINEAR/MONTHLY/WEEKLY strategies), participate in multi-level referral commissions, and optionally vest rewards over time. The architecture provides enterprise-grade features with cryptographic security (EIP-712), gas-efficient Merkle distribution, and mathematical precision.
 
 ---
 
 ## Architecture Overview
 
-### Three-Contract Design
+### Five-Contract Design
 
-#### 1. PoolManager (Primary Contract)
+#### 1. PoolManager (Central Hub - 2221 lines)
 The main contract handling:
 - **Token Sales**: USDT → ECM purchases with Uniswap V2 pricing
 - **Auto-Staking**: Single-call `buyAndStake()` for seamless UX
-- **Reward Distribution**: Dual strategies (LINEAR & MONTHLY)
+- **Reward Distribution**: Three strategies (LINEAR, MONTHLY, WEEKLY)
+- **Referral Integration**: Verifies vouchers and processes direct commissions
 - **Early Unstaking**: Configurable principal slashing (default 25%)
 - **Analytics**: Comprehensive on-chain metrics for users and admins
+- **Vesting Integration**: Automatic vesting schedule creation for rewards
 
-#### 2. LiquidityManager (Isolated Contract)
-Dedicated liquidity handler:
-- Receives explicit token transfers from PoolManager
-- Adds/removes liquidity to Uniswap V2
-- Isolated architecture limits blast-radius
-- Callback mechanism to track liquidity additions
+#### 2. ReferralVoucher (EIP-712 Verification - 247 lines)
+Off-chain voucher verification system:
+- **EIP-712 Signatures**: Cryptographically secure voucher validation
+- **Usage Tracking**: Single-use, multi-use, or unlimited vouchers
+- **Expiry Enforcement**: Timestamp-based voucher expiration
+- **Issuer Management**: Whitelist of authorized voucher signers
+- **Revocation Support**: Admin can cancel specific vouchers
 
-#### 3. VestingManager (Optional Contract)
+#### 3. ReferralModule (Two-Tier Commissions - 505 lines)
+Multi-level referral commission system:
+- **Direct Commissions**: Immediate or accrued payments on purchases (Tier 1)
+- **Multi-Level Commissions**: Merkle-based distribution on reward claims (Tier 2)
+- **10-Level Support**: Up to 10 referral chain levels
+- **Anti-Gaming Rules**: No self-referral, no cyclic chains, immutable relationships
+- **Gas Efficiency**: Off-chain Merkle tree computation, on-chain proof verification
+
+#### 4. VestingManager (Linear Vesting - 526 lines)
 Linear vesting system:
-- Creates vesting schedules for rewards
-- Pro-rata token release over configured duration
-- Users claim vested tokens over time
-- Reduces sell pressure and aligns incentives
+- **Pro-Rata Release**: Tokens unlock linearly over time
+- **Multiple Schedules**: Users can have multiple independent vesting periods
+- **Partial Claims**: Claim vested portions at any time
+- **PoolManager Integration**: Automatic schedule creation on reward claims
+- **Reduces Sell Pressure**: Aligns long-term incentives
+
+#### 5. LiquidityManager (Uniswap Operations - 409 lines)
+Isolated liquidity handler:
+- **Uniswap V2 Integration**: Add/remove liquidity operations
+- **Callback Mechanism**: Notifies PoolManager after liquidity additions
+- **Token Segregation**: Only explicit transfers, never touches user stakes
+- **Blast-Radius Limitation**: Isolated architecture prevents cross-contamination
+- **Treasury Management**: LP tokens sent to configured treasury address
 
 ---
 
@@ -410,6 +432,624 @@ function calculateRewardDepletionTime(uint256 poolId) external view returns (uin
 function getPoolAnalytics(uint256 poolId, uint256 ecmPriceInUsdt) external view returns (...)
 function getUserAnalytics(uint256 poolId, address user) external view returns (...)
 function calculateUnstakePenalty(uint256 poolId, address user) external view returns (...)
+```
+
+---
+
+## ReferralVoucher Contract
+
+### Purpose
+**ReferralVoucher** implements EIP-712 typed signature verification for off-chain referral codes. It allows authorized issuers (backend servers) to generate cryptographically signed vouchers that users can redeem when purchasing ECM tokens. This enables secure, scalable referral code management without storing codes on-chain.
+
+### Core Features
+
+#### EIP-712 Signature Verification
+- **Typed Structured Data**: Uses EIP-712 standard for human-readable signatures
+- **Domain Separation**: Prevents cross-chain and cross-contract replay attacks
+- **Off-Chain Generation**: Backend generates signatures, on-chain verification
+- **No On-Chain Storage**: Referral codes never stored on blockchain (gas efficient)
+
+#### Usage Tracking & Limits
+- **Single-Use Vouchers**: For one-time promotions or unique codes
+- **Multi-Use Vouchers**: With configurable `maxUses` limit (e.g., 100 redemptions)
+- **Unlimited Vouchers**: Perfect for persistent referral codes (`maxUses = 0`)
+- **Usage Counter**: Tracks redemptions per voucher ID
+
+#### Security Features
+- **Issuer Whitelist**: Only authorized addresses can sign valid vouchers
+- **Expiry Enforcement**: Vouchers have timestamp-based expiration
+- **Revocation Support**: Admin can cancel specific voucher IDs
+- **onlyPoolManager Modifier**: Prevents direct user calls, only PoolManager can verify
+
+### Data Structures
+
+#### VoucherInput Struct
+```solidity
+struct VoucherInput {
+    bytes32 vid;           // Unique voucher ID = keccak256(codeHash, owner, nonce)
+    bytes32 codeHash;      // keccak256 of referral code string (e.g., "PROMO2024")
+    address owner;         // Referrer who owns this code
+    uint16 directBps;      // Direct commission rate in basis points (500 = 5%)
+    bool transferOnUse;    // true = immediate transfer, false = accrued
+    uint64 expiry;         // Expiration timestamp (block.timestamp < expiry)
+    uint32 maxUses;        // Usage limit (0 = unlimited)
+    uint256 nonce;         // Unique nonce for generating vid
+}
+```
+
+#### VoucherResult Struct (Return Value)
+```solidity
+struct VoucherResult {
+    address owner;         // Referrer address
+    bytes32 codeHash;      // Code identifier
+    uint16 directBps;      // Commission rate
+    bool transferOnUse;    // Payment mode
+    uint32 usesRemaining;  // Remaining uses (or max if unlimited)
+}
+```
+
+### EIP-712 Type Definition
+```solidity
+// Type hash for voucher
+bytes32 constant VOUCHER_TYPEHASH = keccak256(
+    "ReferralVoucher(bytes32 vid,bytes32 codeHash,address owner,uint16 directBps,bool transferOnUse,uint64 expiry,uint32 maxUses,uint256 nonce)"
+);
+
+// Domain separator (per-chain, per-contract)
+EIP712("ReferralVoucher", "1")
+```
+
+### Key Functions
+
+#### Admin Functions
+```solidity
+// Manage authorized issuers (backend signing keys)
+function addIssuer(address issuer) external onlyOwner
+function removeIssuer(address issuer) external onlyOwner
+
+// Revoke specific voucher ID (emergency)
+function revokeVoucher(bytes32 vid) external onlyOwner
+
+// Set PoolManager address (one-time setup)
+function setPoolManager(address _poolManager) external onlyOwner
+```
+
+#### PoolManager Integration
+```solidity
+// Verify and consume voucher (only callable by PoolManager)
+function verifyAndConsume(
+    VoucherInput calldata voucherInput,
+    bytes calldata signature,
+    address redeemer
+) external onlyPoolManager returns (VoucherResult memory)
+```
+
+**Verification Flow:**
+1. Check `block.timestamp < expiry`
+2. Check `!voucherRevoked[vid]`
+3. Check `voucherUses[vid] < maxUses` (if `maxUses > 0`)
+4. Recover signer from EIP-712 signature
+5. Validate `isIssuer[signer] == true`
+6. Increment `voucherUses[vid]++`
+7. Return `VoucherResult` struct
+
+### Off-Chain Voucher Generation (Backend)
+
+#### TypeScript Example with ethers v6
+```typescript
+import { ethers } from 'ethers';
+
+// EIP-712 Domain
+const domain = {
+  name: 'ReferralVoucher',
+  version: '1',
+  chainId: 1124, // ECM testnet
+  verifyingContract: '0x...' // ReferralVoucher contract address
+};
+
+// EIP-712 Types
+const types = {
+  ReferralVoucher: [
+    { name: 'vid', type: 'bytes32' },
+    { name: 'codeHash', type: 'bytes32' },
+    { name: 'owner', type: 'address' },
+    { name: 'directBps', type: 'uint16' },
+    { name: 'transferOnUse', type: 'bool' },
+    { name: 'expiry', type: 'uint64' },
+    { name: 'maxUses', type: 'uint32' },
+    { name: 'nonce', type: 'uint256' }
+  ]
+};
+
+// Generate voucher
+async function generateVoucher(
+  issuerSigner: ethers.Signer,
+  referralCode: string,
+  referrerAddress: string,
+  directBps: number,
+  transferOnUse: boolean,
+  expiryTimestamp: number,
+  maxUses: number,
+  nonce: bigint
+) {
+  // Hash the referral code
+  const codeHash = ethers.keccak256(ethers.toUtf8Bytes(referralCode));
+  
+  // Generate unique voucher ID
+  const vid = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'address', 'uint256'],
+      [codeHash, referrerAddress, nonce]
+    )
+  );
+  
+  // Voucher data
+  const voucher = {
+    vid,
+    codeHash,
+    owner: referrerAddress,
+    directBps,
+    transferOnUse,
+    expiry: expiryTimestamp,
+    maxUses,
+    nonce
+  };
+  
+  // Sign with EIP-712
+  const signature = await issuerSigner.signTypedData(domain, types, voucher);
+  
+  return { voucher, signature };
+}
+
+// Usage example
+const issuer = new ethers.Wallet('0x...private key', provider);
+const { voucher, signature } = await generateVoucher(
+  issuer,
+  'PROMO2024',              // Referral code
+  '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb', // Referrer address
+  500,                      // 5% commission
+  false,                    // Accrued mode
+  Math.floor(Date.now() / 1000) + 86400 * 30, // 30 days expiry
+  0,                        // Unlimited uses
+  BigInt(12345)             // Unique nonce
+);
+```
+
+### Frontend Integration (User Redemption)
+
+#### React/TypeScript Example
+```typescript
+import { ethers } from 'ethers';
+
+// User buys with referral voucher
+async function buyWithReferral(
+  poolManagerContract: ethers.Contract,
+  poolId: number,
+  maxUsdtAmount: bigint,
+  stakeDuration: number,
+  voucher: VoucherInput,
+  signature: string
+) {
+  // Call buyAndStake with voucher and signature
+  const tx = await poolManagerContract.buyAndStake(
+    poolId,
+    maxUsdtAmount,
+    stakeDuration,
+    voucher,  // VoucherInput struct
+    signature // EIP-712 signature from backend
+  );
+  
+  await tx.wait();
+  console.log('Purchase successful with referral!');
+}
+```
+
+### Security Considerations
+
+#### Protection Against Attacks
+- **Replay Protection**: Each voucher has unique `vid` (includes nonce)
+- **Cross-Chain Protection**: Domain separator includes `chainId`
+- **Cross-Contract Protection**: Domain separator includes `verifyingContract`
+- **Expiry**: Vouchers automatically invalid after `expiry` timestamp
+- **Usage Limits**: `maxUses` prevents unlimited redemptions of single-use codes
+- **Issuer Whitelist**: Only authorized backend keys can sign valid vouchers
+- **Revocation**: Admin can emergency-cancel specific vouchers
+
+#### Gas Optimization
+- **No On-Chain Storage**: Referral codes never stored on-chain
+- **Signature Verification**: Only ~5,000 gas per verification
+- **Stateless Vouchers**: No need to query blockchain for code validity
+
+### Events
+
+```solidity
+event IssuerAdded(address indexed issuer);
+event IssuerRemoved(address indexed issuer);
+event VoucherRevoked(bytes32 indexed vid);
+event VoucherVerified(
+    bytes32 indexed vid,
+    bytes32 indexed codeHash,
+    address indexed owner,
+    address redeemer,
+    uint32 usesRemaining
+);
+```
+
+---
+
+## ReferralModule Contract
+
+### Purpose
+**ReferralModule** implements a sophisticated two-tier commission system for referrals:
+1. **Tier 1 (Direct Commission)**: Immediate or accrued payments on purchases (based on principal)
+2. **Tier 2 (Multi-Level Commission)**: Merkle-based distribution on reward claims (up to 10 levels)
+
+This design optimizes gas efficiency by paying direct commissions immediately while deferring multi-level calculations to off-chain systems with Merkle proof verification.
+
+### Core Features
+
+#### Two-Tier Commission Model
+
+##### Tier 1: Direct Commission (On Purchase)
+- **Trigger**: When user stakes ECM via `buyAndStake()`
+- **Basis**: Staked amount (principal)
+- **Rate**: Configured per voucher (`directBps`, max 20% = 2000 bps)
+- **Payment Modes**:
+  - **Immediate (`transferOnUse=true`)**: ECM transferred to referrer instantly
+  - **Accrued (`transferOnUse=false`)**: Accumulates in `directAccrued` mapping, referrer withdraws later
+- **Gas Cost**: ~30,000 gas (single transfer or state update)
+
+##### Tier 2: Multi-Level Commission (On Reward Claims)
+- **Trigger**: When user claims staking rewards
+- **Basis**: Reward amount (NOT principal)
+- **Levels**: Up to 10 referral chain levels (configurable per pool)
+- **Rate**: Different per level (e.g., L1=5%, L2=3%, L3=2%)
+- **Distribution**: Off-chain Merkle tree computation, on-chain proof verification
+- **Gas Cost**: ~50,000 gas per claim (regardless of referral chain length)
+
+#### Anti-Gaming Rules
+- **No Self-Referral**: `buyer != referrer` enforced
+- **No Cyclic Referrals**: If A refers B, B cannot refer A (2-person loop blocked)
+- **Immutable Referrer**: Once set, `referrerOf[user]` cannot be changed
+- **Max 10 Levels**: Referral chain depth limited to prevent unbounded loops
+- **Total ML Commission Cap**: Sum of all multi-level rates ≤ 50% (5000 bps)
+- **Direct Commission Cap**: `directBps` ≤ 20% (2000 bps)
+
+### Data Structures
+
+#### Referral Relationships
+```solidity
+// Immutable buyer → referrer mapping
+mapping(address => address) public referrerOf;
+
+// Accrued direct commissions (for transferOnUse=false mode)
+mapping(address => uint256) public directAccrued;
+```
+
+#### Pool-Level Multi-Level Config
+```solidity
+// Multi-level commission rates per pool (up to 10 levels)
+// Example: [500, 300, 200, 100, 100, 50, 50, 25, 25, 25]
+//          = [5%, 3%, 2%, 1%, 1%, 0.5%, 0.5%, 0.25%, 0.25%, 0.25%]
+mapping(uint256 => uint16[]) public poolLevelConfig;
+```
+
+#### Merkle Distribution (Tier 2)
+```solidity
+struct ReferralPayoutRoot {
+    bytes32 merkleRoot;       // Root of Merkle tree
+    uint256 totalAmount;      // Total ECM allocated for this epoch
+    uint256 expiry;           // Expiration timestamp
+    bool withdrawn;           // Whether unclaimed tokens recovered
+}
+
+// Epoch ID → Payout root
+mapping(uint256 => ReferralPayoutRoot) public payoutRoots;
+
+// Track claims: epochId → user → claimed
+mapping(uint256 => mapping(address => bool)) public claimedInEpoch;
+```
+
+### Key Functions
+
+#### Direct Commission (Tier 1)
+
+##### Record Purchase & Pay Direct
+```solidity
+function recordPurchaseAndPayDirect(
+    bytes32 codeHash,
+    address buyer,
+    address referrer,
+    uint256 poolId,
+    uint256 stakedAmount,
+    IERC20 token,
+    uint16 directBps,
+    bool transferOnUse
+) external onlyPoolManager
+```
+
+**Process:**
+1. Link referrer if first purchase: `referrerOf[buyer] = referrer`
+2. Calculate commission: `directAmount = stakedAmount * directBps / 10000`
+3. If `transferOnUse`:
+   - Transfer ECM to referrer immediately
+   - Emit `DirectCommissionPaid`
+4. Else:
+   - Accumulate: `directAccrued[referrer] += directAmount`
+   - Emit `DirectCommissionAccrued`
+
+##### Withdraw Accrued Direct Commissions
+```solidity
+function withdrawDirectAccrual(uint256 amount) external nonReentrant
+```
+- **Caller**: Referrer
+- **Purpose**: Withdraw accumulated direct commissions
+- **Process**:
+  1. Verify `directAccrued[msg.sender] >= amount`
+  2. Deduct: `directAccrued[msg.sender] -= amount`
+  3. Transfer ECM to msg.sender
+
+#### Multi-Level Commission (Tier 2)
+
+##### Record Reward Claim Event (On-Chain)
+```solidity
+function recordRewardClaimEvent(
+    address claimant,
+    uint256 poolId,
+    uint256 rewardAmount
+) external onlyPoolManager
+```
+- **Purpose**: Emit event for off-chain indexer to process
+- **Emits**: `RewardClaimRecorded(claimant, poolId, rewardAmount, block.timestamp)`
+
+##### Submit Merkle Root (Admin/Backend)
+```solidity
+function submitReferralPayoutRoot(
+    uint256 epochId,
+    address token,
+    uint256 totalAmount,
+    bytes32 merkleRoot,
+    uint256 expiry
+) external onlyOwner
+```
+- **Purpose**: Upload computed Merkle root for epoch-based distribution
+- **Process**:
+  1. Transfer `totalAmount` ECM from admin to ReferralModule
+  2. Store `ReferralPayoutRoot` struct
+  3. Emit `ReferralPayoutRootSubmitted`
+
+##### Claim Multi-Level Commission (User)
+```solidity
+function claimReferral(
+    uint256 epochId,
+    address token,
+    uint256 amount,
+    bytes32[] calldata proof
+) external nonReentrant
+```
+- **Purpose**: Users claim their multi-level commissions with Merkle proof
+- **Process**:
+  1. Verify proof against `payoutRoots[epochId].merkleRoot`
+  2. Leaf = `keccak256(abi.encodePacked(msg.sender, token, amount, epochId))`
+  3. Check: `!claimedInEpoch[epochId][msg.sender]`
+  4. Check: `block.timestamp < expiry`
+  5. Mark claimed: `claimedInEpoch[epochId][msg.sender] = true`
+  6. Transfer ECM to msg.sender
+  7. Emit `ReferralPayoutClaimed`
+
+#### Configuration
+
+```solidity
+// Set multi-level commission rates per pool
+function setPoolLevelConfig(
+    uint256 poolId,
+    uint16[] calldata mlBps
+) external onlyOwner
+
+// Set PoolManager address
+function setPoolManager(address _poolManager) external onlyOwner
+
+// Fund contract with ECM for commissions
+function fundContract(uint256 amount) external
+```
+
+### Off-Chain Multi-Level Calculation (Backend)
+
+#### Algorithm
+1. **Listen to Events**: Monitor `RewardClaimRecorded(claimant, poolId, rewardAmount)`
+2. **Walk Referral Chain**:
+   ```
+   claimant → referrer1 → referrer2 → ... → referrer10
+   ```
+3. **Calculate Commissions**:
+   ```typescript
+   for (let level = 0; level < 10; level++) {
+     const referrer = referralChain[level];
+     if (!referrer) break;
+     
+     const mlBps = poolLevelConfig[poolId][level];
+     const commission = rewardAmount * mlBps / 10000;
+     
+     commissions.push({
+       beneficiary: referrer,
+       token: ecmAddress,
+       amount: commission,
+       epochId: currentEpochId
+     });
+   }
+   ```
+4. **Build Merkle Tree**:
+   ```typescript
+   const leaves = commissions.map(c => 
+     ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+       ['address', 'address', 'uint256', 'uint256'],
+       [c.beneficiary, c.token, c.amount, c.epochId]
+     ))
+   );
+   
+   const tree = new MerkleTree(leaves.sort(), keccak256, { sortPairs: true });
+   const root = tree.getRoot();
+   ```
+5. **Submit Root**: Call `submitReferralPayoutRoot(epochId, token, totalAmount, root, expiry)`
+6. **Provide Proofs**: Generate Merkle proofs for each beneficiary via API
+
+#### TypeScript Example
+```typescript
+import { MerkleTree } from 'merkletreejs';
+import { ethers } from 'ethers';
+
+interface Commission {
+  beneficiary: string;
+  token: string;
+  amount: bigint;
+  epochId: number;
+}
+
+function calculateMultiLevelCommissions(
+  claimant: string,
+  rewardAmount: bigint,
+  poolId: number,
+  poolLevelConfig: number[], // [500, 300, 200, ...]
+  referrerOf: Map<string, string> // buyer → referrer mapping
+): Commission[] {
+  const commissions: Commission[] = [];
+  let current = claimant;
+  
+  for (let level = 0; level < 10 && level < poolLevelConfig.length; level++) {
+    const referrer = referrerOf.get(current);
+    if (!referrer) break;
+    
+    const mlBps = poolLevelConfig[level];
+    const commission = (rewardAmount * BigInt(mlBps)) / 10000n;
+    
+    if (commission > 0) {
+      commissions.push({
+        beneficiary: referrer,
+        token: ecmAddress,
+        amount: commission,
+        epochId: currentEpochId
+      });
+    }
+    
+    current = referrer;
+  }
+  
+  return commissions;
+}
+
+function buildMerkleTree(commissions: Commission[]): {
+  root: string;
+  proofs: Map<string, string[]>;
+} {
+  const leaves = commissions.map(c => 
+    ethers.solidityPackedKeccak256(
+      ['address', 'address', 'uint256', 'uint256'],
+      [c.beneficiary, c.token, c.amount, c.epochId]
+    )
+  ).sort();
+  
+  const tree = new MerkleTree(leaves, keccak256, { sortPairs: true });
+  const root = tree.getHexRoot();
+  
+  const proofs = new Map<string, string[]>();
+  commissions.forEach((c, i) => {
+    const proof = tree.getHexProof(leaves[i]);
+    proofs.set(c.beneficiary, proof);
+  });
+  
+  return { root, proofs };
+}
+```
+
+### Integration Flow Example
+
+#### Complete Purchase with Direct Commission
+```solidity
+// User calls PoolManager.buyAndStake() with voucher
+// PoolManager:
+1. Verifies voucher via ReferralVoucher.verifyAndConsume()
+2. Transfers USDT from user
+3. Updates pool accounting (sold, totalStaked, etc.)
+4. Calls ReferralModule.recordPurchaseAndPayDirect()
+   - Calculates direct commission (e.g., 1000 ECM * 5% = 50 ECM)
+   - If transferOnUse: Transfers 50 ECM to referrer
+   - Else: Accumulates in directAccrued[referrer]
+5. Emits BoughtAndStaked event
+```
+
+#### Complete Reward Claim with Multi-Level Commission
+```solidity
+// User calls PoolManager.claimRewards()
+// PoolManager:
+1. Calculates pending rewards (e.g., 500 ECM)
+2. Transfers rewards to user (or creates vesting schedule)
+3. Calls ReferralModule.recordRewardClaimEvent(user, poolId, 500 ECM)
+   - Emits RewardClaimRecorded event
+
+// Off-chain backend:
+4. Listens to RewardClaimRecorded event
+5. Calculates multi-level commissions:
+   - L1 referrer: 500 * 5% = 25 ECM
+   - L2 referrer: 500 * 3% = 15 ECM
+   - L3 referrer: 500 * 2% = 10 ECM
+6. Builds Merkle tree with all commissions for epoch
+7. Calls ReferralModule.submitReferralPayoutRoot()
+
+// Users (referrers):
+8. Query backend API for their commission amount and proof
+9. Call ReferralModule.claimReferral(epochId, token, amount, proof)
+10. Receive multi-level commission ECM
+```
+
+### Gas Efficiency Analysis
+
+#### Direct Commission (Tier 1)
+- **Immediate Transfer**: ~30,000 gas (SSTORE + CALL)
+- **Accrued Mode**: ~20,000 gas (single SSTORE)
+- **Withdraw**: ~25,000 gas per withdrawal
+
+#### Multi-Level Commission (Tier 2)
+- **Record Event**: ~1,500 gas (emit only)
+- **Submit Root**: ~45,000 gas (one-time per epoch)
+- **Claim with Proof**: ~50,000 gas per claim
+  - Merkle verification: ~20,000 gas (log₂N hashes)
+  - State updates: ~20,000 gas
+  - Transfer: ~10,000 gas
+
+**Comparison with Naive Approach:**
+- Naive: ~200,000 gas per reward claim (10 transfers in loop)
+- Merkle: ~50,000 gas per claim (75% reduction)
+- **Savings**: ~150,000 gas per claim with 10-level referrals
+
+### Events
+
+```solidity
+event ReferrerLinked(address indexed buyer, address indexed referrer, bytes32 indexed codeHash);
+event DirectCommissionPaid(address indexed referrer, uint256 amount, address token);
+event DirectCommissionAccrued(address indexed referrer, uint256 amount);
+event DirectCommissionWithdrawn(address indexed referrer, uint256 amount);
+
+event RewardClaimRecorded(
+    address indexed claimant,
+    uint256 indexed poolId,
+    uint256 rewardAmount,
+    uint256 timestamp
+);
+
+event ReferralPayoutRootSubmitted(
+    uint256 indexed epochId,
+    address indexed token,
+    bytes32 merkleRoot,
+    uint256 totalAmount,
+    uint256 expiry
+);
+
+event ReferralPayoutClaimed(
+    uint256 indexed epochId,
+    address indexed claimer,
+    address token,
+    uint256 amount
+);
 ```
 
 ---

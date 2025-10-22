@@ -11,6 +11,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IUniswapV2Router02.sol";
+import "./interfaces/IReferralVoucher.sol";
+import "./interfaces/IReferralModule.sol";
 
 interface IVestingManager {
     function createVesting(
@@ -185,6 +187,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @dev Used for callback authorization in recordLiquidityAdded()
     mapping(address => bool) public authorizedLiquidityManagers;
 
+    /// @notice ReferralVoucher contract for voucher verification
+    IReferralVoucher public referralVoucher;
+
+    /// @notice ReferralModule contract for referral tracking and commissions
+    IReferralModule public referralModule;
+
     // ============================================
     // EVENTS
     // ============================================
@@ -204,7 +212,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         address indexed user,
         uint256 ecmAmount,
         uint256 usdtPaid,
-        uint256 stakeDuration
+        uint256 stakeDuration,
+        address referrer,
+        bytes32 codeHash
     );
     event Unstaked(
         uint256 indexed poolId,
@@ -268,6 +278,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     event LiquidityManagerAuthorized(address indexed manager);
     event LiquidityManagerDeauthorized(address indexed manager);
     event OwedLiquidityRefilled(uint256 indexed poolId, uint256 ecmAmount);
+    event ReferralVoucherSet(address indexed referralVoucher);
+    event ReferralModuleSet(address indexed referralModule);
 
     // ============================================
     // ERRORS
@@ -280,8 +292,6 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     error SlippageExceeded();
     error MinPurchaseNotMet();
     error PoolDoesNotExist();
-    error UniswapQueryFailed(string reason);
-    error UniswapQueryFailedBytes(bytes lowLevelData);
     error NotStaked();
     error InvalidRewards();
     error InvalidPenaltyBps();
@@ -568,6 +578,22 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         emit VestingManagerSet(_vestingManager);
     }
 
+    /// @notice Sets the ReferralVoucher contract address
+    /// @param _referralVoucher Address of the ReferralVoucher contract
+    function setReferralVoucher(address _referralVoucher) external onlyOwner {
+        if (_referralVoucher == address(0)) revert InvalidAddress();
+        referralVoucher = IReferralVoucher(_referralVoucher);
+        emit ReferralVoucherSet(_referralVoucher);
+    }
+
+    /// @notice Sets the ReferralModule contract address
+    /// @param _referralModule Address of the ReferralModule contract
+    function setReferralModule(address _referralModule) external onlyOwner {
+        if (_referralModule == address(0)) revert InvalidAddress();
+        referralModule = IReferralModule(_referralModule);
+        emit ReferralModuleSet(_referralModule);
+    }
+
     // ============================================
     // ADMIN FUNCTIONS - AUTHORIZATION MANAGEMENT
     // ============================================
@@ -706,10 +732,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param poolId The pool ID
     /// @param maxUsdtAmount Maximum USDT willing to spend
     /// @param selectedStakeDuration Selected staking duration
+    /// @param voucherInput Referral voucher data (optional - use zero values if no referral)
+    /// @param voucherSignature EIP-712 signature for voucher (optional)
     function buyAndStake(
         uint256 poolId,
         uint256 maxUsdtAmount,
-        uint256 selectedStakeDuration
+        uint256 selectedStakeDuration,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
     ) external nonReentrant whenNotPaused {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (maxUsdtAmount == 0) revert InvalidAmount();
@@ -746,6 +776,33 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // Update pool accounting
         pool.sold += ecmToAllocate;
         pool.collectedUSDT += usdtRequired;
+
+        // Handle referral voucher if provided
+        address referrer = address(0);
+        bytes32 codeHash = bytes32(0);
+        if (address(referralVoucher) != address(0) && voucherInput.vid != bytes32(0)) {
+            IReferralVoucher.VoucherResult memory voucherResult = referralVoucher.verifyAndConsume(
+                voucherInput,
+                voucherSignature,
+                msg.sender
+            );
+            referrer = voucherResult.owner;
+            codeHash = voucherResult.codeHash;
+
+            // Record purchase and pay/accrue direct commission
+            if (address(referralModule) != address(0)) {
+                referralModule.recordPurchaseAndPayDirect(
+                    codeHash,
+                    msg.sender,
+                    referrer,
+                    poolId,
+                    ecmToAllocate,
+                    address(pool.ecm),
+                    voucherResult.directBps,
+                    voucherResult.transferOnUse
+                );
+            }
+        }
 
         // Update user info and auto-stake
         UserInfo storage user = userInfo[poolId][msg.sender];
@@ -789,7 +846,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             msg.sender,
             ecmToAllocate,
             usdtRequired,
-            selectedStakeDuration
+            selectedStakeDuration,
+            referrer,
+            codeHash
         );
     }
 
@@ -798,11 +857,15 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param exactEcmAmount Exact ECM amount to buy (must be multiple of 500)
     /// @param maxUsdtAmount Maximum USDT willing to spend
     /// @param selectedStakeDuration Selected staking duration
+    /// @param voucherInput Referral voucher data (optional - use zero values if no referral)
+    /// @param voucherSignature EIP-712 signature for voucher (optional)
     function buyExactECMAndStake(
         uint256 poolId,
         uint256 exactEcmAmount,
         uint256 maxUsdtAmount,
-        uint256 selectedStakeDuration
+        uint256 selectedStakeDuration,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
     ) external nonReentrant whenNotPaused {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (exactEcmAmount == 0) revert InvalidAmount();
@@ -832,6 +895,33 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // Update pool accounting
         pool.sold += exactEcmAmount;
         pool.collectedUSDT += usdtRequired;
+
+        // Handle referral voucher if provided
+        address referrer = address(0);
+        bytes32 codeHash = bytes32(0);
+        if (address(referralVoucher) != address(0) && voucherInput.vid != bytes32(0)) {
+            IReferralVoucher.VoucherResult memory voucherResult = referralVoucher.verifyAndConsume(
+                voucherInput,
+                voucherSignature,
+                msg.sender
+            );
+            referrer = voucherResult.owner;
+            codeHash = voucherResult.codeHash;
+
+            // Record purchase and pay/accrue direct commission
+            if (address(referralModule) != address(0)) {
+                referralModule.recordPurchaseAndPayDirect(
+                    codeHash,
+                    msg.sender,
+                    referrer,
+                    poolId,
+                    exactEcmAmount,
+                    address(pool.ecm),
+                    voucherResult.directBps,
+                    voucherResult.transferOnUse
+                );
+            }
+        }
 
         // Update user info and auto-stake
         UserInfo storage user = userInfo[poolId][msg.sender];
@@ -875,7 +965,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             msg.sender,
             exactEcmAmount,
             usdtRequired,
-            selectedStakeDuration
+            selectedStakeDuration,
+            referrer,
+            codeHash
         );
     }
 
@@ -1004,6 +1096,15 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (paid > 0) {
             user.totalRewardsClaimed += paid;
             user.lastActionTimestamp = block.timestamp;
+
+            // Record reward claim event for referral module (for off-chain engine)
+            if (address(referralModule) != address(0)) {
+                referralModule.recordRewardClaimEvent(
+                    msg.sender,
+                    poolId,
+                    paid
+                );
+            }
         }
     }
 
@@ -2009,12 +2110,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 revert VestingFailed();
             }
             pool.ecmVested += amount;
-            emit RewardsClaimed(poolId, user, amount, true);
         } else {
             // Direct transfer - track as paid rewards
             pool.ecm.safeTransfer(user, amount);
-            emit RewardsClaimed(poolId, user, amount, false);
         }
+        emit RewardsClaimed(poolId, user, amount, shouldVest);
 
         return amount;
     }

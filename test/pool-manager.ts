@@ -1,10 +1,10 @@
 import { expect } from "chai";
 import hre, { ethers } from "hardhat";
-import { parseEther, parseUnits, ZeroAddress } from "ethers";
+import MerkleTree from "merkletreejs";
+import { parseEther, parseUnits, ZeroAddress,keccak256 } from "ethers";
 import { mine, time } from "@nomicfoundation/hardhat-network-helpers";
-import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
-import { parse } from "path";
 import { setNextBlockTimestamp } from "@nomicfoundation/hardhat-network-helpers/dist/src/helpers/time";
+import { get } from "http";
 
 /**
  * PoolManager & VestingManager Test Suite
@@ -126,6 +126,23 @@ describe("PoolManager & VestingManager", function () {
     const blockNum = await ethers.provider.getBlockNumber();
     const block = await ethers.provider.getBlock(blockNum);
     return block ? block.timestamp : 0;
+  }
+
+  /**
+   * Create empty voucher input for calls without referral
+   * Used to maintain backward compatibility with old buyAndStake() signature
+   */
+  function getEmptyVoucherInput() {
+    return {
+      vid: ethers.ZeroHash,
+      codeHash: ethers.ZeroHash,
+      owner: ethers.ZeroAddress,
+      directBps: 0,
+      transferOnUse: false,
+      expiry: 0,
+      maxUses: 0,
+      nonce: 0
+    };
   }
 
   /**
@@ -1237,7 +1254,9 @@ describe("PoolManager & VestingManager", function () {
         poolId,
         stakeEcm,
         requiredUsdt + 1n,
-        THIRTY_DAYS
+        THIRTY_DAYS,
+        getEmptyVoucherInput(),
+        "0x"
       );
 
       return poolId;
@@ -1338,7 +1357,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const poolInfo = await poolManager.getPoolInfo(poolId);
         const collectedUsdt = poolInfo.collectedUSDT;
@@ -1364,7 +1383,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Transfer some ECM to liquidity manager
         const ecmToTransfer = parseEther("500");
@@ -1472,7 +1491,7 @@ describe("PoolManager & VestingManager", function () {
       console.log(`Estimated ECM for ${ethers.formatUnits(maxUsdt, 6)} USDT: ${ethers.formatEther(estimatedEcm)}`);
 
       await expect(
-        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS)
+        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.emit(poolManager, "BoughtAndStaked");
 
       const userInfoAfter = await poolManager.getUserInfo(poolId, user1.address);
@@ -1494,10 +1513,9 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, maxUsdt);
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, maxUsdt, NINETY_DAYS)
-      )
-        .to.emit(poolManager, "BoughtAndStaked")
-        .withArgs(poolId, user1.address, exactEcm, requiredUsdt, NINETY_DAYS);
+        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, maxUsdt, NINETY_DAYS, getEmptyVoucherInput(), "0x"
+      )).to.emit(poolManager, "BoughtAndStaked")
+        .withArgs(poolId, user1.address, exactEcm, requiredUsdt, NINETY_DAYS,ZeroAddress,"0x0000000000000000000000000000000000000000000000000000000000000000");
 
       const userInfo = await poolManager.getUserInfo(poolId, user1.address);
       expect(userInfo.staked).to.equal(exactEcm);
@@ -1512,7 +1530,7 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, tinyUsdt);
 
       await expect(
-        poolManager.connect(user1).buyAndStake(poolId, tinyUsdt, THIRTY_DAYS)
+        poolManager.connect(user1).buyAndStake(poolId, tinyUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
     });
 
@@ -1526,7 +1544,7 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, invalidEcm, requiredUsdt, THIRTY_DAYS)
+        poolManager.connect(user1).buyExactECMAndStake(poolId, invalidEcm, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
     });
 
@@ -1540,7 +1558,7 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, maxUsdt);
 
       await expect(
-        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS)
+        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "PoolNotActive");
     });
 
@@ -1568,7 +1586,7 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, insufficientUsdt, THIRTY_DAYS)
+        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, insufficientUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "SlippageExceeded");
     });
 
@@ -1581,7 +1599,7 @@ describe("PoolManager & VestingManager", function () {
       const invalidDuration = 15 * 24 * 60 * 60; // 15 days (not in allowedStakeDurations)
 
       await expect(
-        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, invalidDuration)
+        poolManager.connect(user1).buyAndStake(poolId, maxUsdt, invalidDuration, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "InvalidStakeDuration");
     });
 
@@ -1589,11 +1607,11 @@ describe("PoolManager & VestingManager", function () {
       const poolId = await setupPoolForPurchase();
 
       await expect(
-        poolManager.connect(user1).buyAndStake(poolId, 0, THIRTY_DAYS)
+        poolManager.connect(user1).buyAndStake(poolId, 0, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, 0, parseUnits("100", 6), THIRTY_DAYS)
+        poolManager.connect(user1).buyExactECMAndStake(poolId, 0, parseUnits("100", 6), THIRTY_DAYS, getEmptyVoucherInput(), "0x")
       ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
     });
 
@@ -1607,7 +1625,7 @@ describe("PoolManager & VestingManager", function () {
 
       const poolBefore = await poolManager.getPoolInfo(poolId);
 
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
 
       const poolAfter = await poolManager.getPoolInfo(poolId);
 
@@ -1624,11 +1642,11 @@ describe("PoolManager & VestingManager", function () {
 
       // User1 buys
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, ecmAmount, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, ecmAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
 
       // User2 buys
       await usdtToken.connect(user2).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user2).buyExactECMAndStake(poolId, ecmAmount, requiredUsdt, NINETY_DAYS);
+      await poolManager.connect(user2).buyExactECMAndStake(poolId, ecmAmount, requiredUsdt, NINETY_DAYS, getEmptyVoucherInput(), "0x");
 
       const user1Info = await poolManager.getUserInfo(poolId, user1.address);
       const user2Info = await poolManager.getUserInfo(poolId, user2.address);
@@ -1652,10 +1670,10 @@ describe("PoolManager & VestingManager", function () {
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
 
       await expect(
-        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, ONE_EIGHTY_DAYS)
+        poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x")
       )
         .to.emit(poolManager, "BoughtAndStaked")
-        .withArgs(poolId, user1.address, exactEcm, requiredUsdt, ONE_EIGHTY_DAYS);
+        .withArgs(poolId, user1.address, exactEcm, requiredUsdt, ONE_EIGHTY_DAYS,ZeroAddress,"0x0000000000000000000000000000000000000000000000000000000000000000");
     });
 
     it("Should track historical analytics correctly", async function () {
@@ -1665,7 +1683,7 @@ describe("PoolManager & VestingManager", function () {
       const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, exactEcm);
 
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, exactEcm, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
 
       const userInfo = await poolManager.getUserInfo(poolId, user1.address);
       const poolInfo = await poolManager.getPoolInfo(poolId);
@@ -1690,7 +1708,7 @@ describe("PoolManager & VestingManager", function () {
       const firstEcm = parseEther("1000");
       const firstUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, firstEcm);
       await usdtToken.connect(user1).approve(poolManager.target, firstUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, firstEcm, firstUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, firstEcm, firstUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
 
       // Wait some time for rewards to accrue
       await time.increase(7 * 24 * 3600); // 7 days
@@ -1699,7 +1717,7 @@ describe("PoolManager & VestingManager", function () {
       const secondEcm = parseEther("500");
       const secondUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, secondEcm);
       await usdtToken.connect(user1).approve(poolManager.target, secondUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, secondEcm, secondUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, secondEcm, secondUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
 
       const userInfo = await poolManager.getUserInfo(poolId, user1.address);
       expect(userInfo.staked).to.equal(firstEcm + secondEcm);
@@ -1716,14 +1734,14 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Try to buy and stake again without unstaking first
         const secondUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, secondUsdt);
         
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, secondUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, secondUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.not.reverted;
       });
 
@@ -1739,7 +1757,7 @@ describe("PoolManager & VestingManager", function () {
         await usdtToken.connect(user1).approve(poolManager.target, insufficientUsdt);
         
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, insufficientUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, insufficientUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "SlippageExceeded");
       });
 
@@ -1757,7 +1775,7 @@ describe("PoolManager & VestingManager", function () {
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
         
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, largeAmount, usdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, largeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "InsufficientPoolECM");
       });
 
@@ -1773,7 +1791,7 @@ describe("PoolManager & VestingManager", function () {
         
         const invalidDuration = 15 * 24 * 3600; // 15 days (not in allowed list)
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, invalidDuration)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, invalidDuration, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "InvalidStakeDuration");
         
         // Test 2: Amount below minimum
@@ -1782,7 +1800,7 @@ describe("PoolManager & VestingManager", function () {
         await usdtToken.connect(user1).approve(poolManager.target, smallUsdt);
         
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, smallUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, smallUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
         
         // Test 3: Amount not multiple of 500
@@ -1791,7 +1809,7 @@ describe("PoolManager & VestingManager", function () {
         await usdtToken.connect(user1).approve(poolManager.target, notMultipleUsdt);
         
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, notMultiple, notMultipleUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, notMultiple, notMultipleUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "InvalidAmount");
       });
     });
@@ -1815,7 +1833,7 @@ describe("PoolManager & VestingManager", function () {
       const stakeAmount = parseEther("1000");
       const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
       
       return { poolId, stakeAmount };
     }
@@ -2037,7 +2055,7 @@ describe("PoolManager & VestingManager", function () {
       const stakeAmount = parseEther("1000");
       const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
       
       // Wait for rewards
       await time.increase(20 * 24 * 3600); // 20 days
@@ -2134,7 +2152,7 @@ describe("PoolManager & VestingManager", function () {
       const stakeAmount = parseEther("1000");
       const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
       await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
       
       await time.increase(15 * 24 * 3600);
       
@@ -2281,7 +2299,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const currentTime = await getCurrentTimestamp();
         await setNextBlockTimestamp(currentTime + THIRTY_DAYS);
@@ -2317,12 +2335,12 @@ describe("PoolManager & VestingManager", function () {
         
         const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt1);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt1, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt1, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user2).approve(poolManager.target, usdt2);
-        await poolManager.connect(user2).buyExactECMAndStake(poolId, stakeAmount, usdt2, THIRTY_DAYS);
-        
+        await poolManager.connect(user2).buyExactECMAndStake(poolId, stakeAmount, usdt2, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
+
         // Wait long enough to deplete rewards
         const currentTime = await getCurrentTimestamp();
         await setNextBlockTimestamp(currentTime + 90 * 24 * 3600);
@@ -2350,7 +2368,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Claim immediately (no time has passed, no rewards)
         const pending = await poolManager.pendingRewards(poolId, user1.address);
@@ -2379,7 +2397,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("10000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Wait long time to accumulate more than available
         const currentTime = await getCurrentTimestamp();
@@ -2413,7 +2431,7 @@ describe("PoolManager & VestingManager", function () {
           const stakeAmount = parseEther("5000");
           const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
           await usdtToken.connect(user).approve(poolManager.target, usdt);
-          await poolManager.connect(user).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+          await poolManager.connect(user).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         }
         
         const currentTime = await getCurrentTimestamp();
@@ -2453,13 +2471,13 @@ describe("PoolManager & VestingManager", function () {
       const stake1 = parseEther("2000");
       const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
       await usdtToken.connect(user1).approve(poolManager.target, usdt1);
-      await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS);
+      await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
       
       // User2 stakes 3000 ECM
       const stake2 = parseEther("3000");
       const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
       await usdtToken.connect(user2).approve(poolManager.target, usdt2);
-      await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, NINETY_DAYS);
+      await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, NINETY_DAYS, getEmptyVoucherInput(), "0x");
       
       return { poolId, stake1, stake2 };
     }
@@ -2652,7 +2670,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS , getEmptyVoucherInput(), "0x");
         
         // Wait 15 days (half month)
         await time.increase(15 * 24 * 3600);
@@ -2768,13 +2786,13 @@ describe("PoolManager & VestingManager", function () {
         const smallStake = parseEther("1000");
         const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, smallStake);
         await usdtToken.connect(user1).approve(poolManager.target, usdt1);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, smallStake, usdt1, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, smallStake, usdt1, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         const apr1 = await poolManager.calculateAPR(poolId, parseEther("1"));
         // Large stake
         const largeStake = parseEther("10000");
         const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, largeStake);
         await usdtToken.connect(user2).approve(poolManager.target, usdt2);
-        await poolManager.connect(user2).buyExactECMAndStake(poolId, largeStake, usdt2, THIRTY_DAYS);
+        await poolManager.connect(user2).buyExactECMAndStake(poolId, largeStake, usdt2, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         const apr2 = await poolManager.calculateAPR(poolId, parseEther("1"));
         // APR should decrease with more stake (same rewards distributed over more principal)
         expect(apr2).to.be.lte(apr1);
@@ -2821,7 +2839,7 @@ describe("PoolManager & VestingManager", function () {
         const stake1 = parseEther("1000");
         const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
         await usdtToken.connect(user1).approve(poolManager.target, usdt1);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const ecmPriceInUsdt = parseEther("0.5"); // 0.5 USDT per ECM
         const tvl1 = await poolManager.calculateTVL(poolId, ecmPriceInUsdt);
@@ -2830,7 +2848,7 @@ describe("PoolManager & VestingManager", function () {
         const stake2 = parseEther("2000");
         const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
         await usdtToken.connect(user2).approve(poolManager.target, usdt2);
-        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, THIRTY_DAYS);
+        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const tvl2 = await poolManager.calculateTVL(poolId, ecmPriceInUsdt);
         
@@ -2876,14 +2894,14 @@ describe("PoolManager & VestingManager", function () {
         const stake = parseEther("10000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stake);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const utilization2 = await poolManager.calculateUtilizationRate(poolId);
         expect(utilization2).to.be.gt(0);
         
         // Make another purchase
         await usdtToken.connect(user2).approve(poolManager.target, usdt);
-        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake, usdt, THIRTY_DAYS);
+        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const utilization3 = await poolManager.calculateUtilizationRate(poolId);
         expect(utilization3).to.be.gt(utilization2);
@@ -3009,7 +3027,7 @@ describe("PoolManager & VestingManager", function () {
 
         const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, tooSmall);
         expect(requiredUsdt).to.be.gt(0);
-        await expect(poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, requiredUsdt, THIRTY_DAYS))
+        await expect(poolManager.connect(user1).buyExactECMAndStake(poolId, tooSmall, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x"))
           .to.be.revertedWithCustomError(poolManager, "InvalidAmount");
       });
 
@@ -3053,7 +3071,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const currentTime = await getCurrentTimestamp();
         await setNextBlockTimestamp(currentTime + 7 * 24 * 3600);
@@ -3086,7 +3104,7 @@ describe("PoolManager & VestingManager", function () {
         
         const stakeAmount = parseEther("1000");
         await usdtToken.approve(poolManager.target, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount));
-        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS);
+        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         const duration = THIRTY_DAYS;
 
         await time.increase(3600); // Ensure some time has passed
@@ -3109,7 +3127,7 @@ describe("PoolManager & VestingManager", function () {
         
         const stakeAmount = parseEther("1000");
         await usdtToken.approve(poolManager.target, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount));
-        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS);
+        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         const duration = 60 * 24 * 3600; // 2 months
         
         const expected = await poolManager.calculateExpectedRewards(
@@ -3130,9 +3148,9 @@ describe("PoolManager & VestingManager", function () {
         
         const stakeAmount = parseEther("1000");
         const duration = 14 * 24 * 3600; // 2 weeks
-         await usdtToken.approve(poolManager.target, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount));
-        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS);
-        
+        await usdtToken.approve(poolManager.target, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount));
+        await poolManager.buyExactECMAndStake(poolId, stakeAmount, await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount), THIRTY_DAYS, getEmptyVoucherInput(), "0x");
+
         const expected = await poolManager.calculateExpectedRewards(
           poolId,
           owner.address,
@@ -3202,7 +3220,7 @@ describe("PoolManager & VestingManager", function () {
         expect(roi180).to.be.gte(roi90);
       });
 
-      it.only("Should revert for non-existent pool", async function () {
+      it("Should revert for non-existent pool", async function () {
         await expect(
           poolManager.calculateROI(999, user1.address, THIRTY_DAYS, parseUnits("0.5", 6))
         ).to.be.revertedWithCustomError(poolManager, "PoolDoesNotExist");
@@ -3218,7 +3236,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const analytics = await poolManager.getUserAnalytics(poolId, user1.address);
         
@@ -3241,7 +3259,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const currentTime = await getCurrentTimestamp();
         await setNextBlockTimestamp(currentTime + THIRTY_DAYS);
@@ -3273,7 +3291,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const currentTime = await getCurrentTimestamp();
         await setNextBlockTimestamp(currentTime + THIRTY_DAYS);
@@ -3290,7 +3308,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const usdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, usdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, usdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Don't wait for maturity
         const penalty = await poolManager.calculateUnstakePenalty(poolId, user1.address);
@@ -3367,7 +3385,7 @@ describe("PoolManager & VestingManager", function () {
         await usdtToken.connect(user1).approve(poolManager.target, maxUsdt);
         
         await expect(
-          poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyAndStake(poolId, maxUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.be.revertedWithCustomError(poolManager, "EnforcedPause");
       });
 
@@ -3531,7 +3549,7 @@ describe("PoolManager & VestingManager", function () {
         const stakeAmount = parseEther("1000");
         const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
         await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const poolInfo = await poolManager.getPoolInfo(poolId);
         expect(poolInfo.totalStaked).to.equal(stakeAmount);
@@ -3733,7 +3751,7 @@ describe("PoolManager & VestingManager", function () {
         
         // Normal operation should work (not blocked by reentrancy guard)
         await expect(
-          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS)
+          poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x")
         ).to.not.be.reverted;
       });
 
@@ -3746,12 +3764,12 @@ describe("PoolManager & VestingManager", function () {
         const stake1 = parseEther("1000");
         const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
         await usdtToken.connect(user1).approve(poolManager.target, usdt1);
-        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS);
+        await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
         
         const stake2 = parseEther("2000");
         const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
         await usdtToken.connect(user2).approve(poolManager.target, usdt2);
-        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, NINETY_DAYS);
+        await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, NINETY_DAYS, getEmptyVoucherInput(), "0x");
         
         // Check accounting
         const poolInfo = await poolManager.getPoolInfo(poolId);
@@ -5860,6 +5878,1190 @@ describe("PoolManager & VestingManager", function () {
         
         const vestingInfo = await vestingManager.getVestingInfo(0);
         expect(vestingInfo.claimed).to.be.closeTo(usdtAmount / 2n, parseUnits("10", 6));
+      });
+    });
+  });
+
+  // ============================================
+  // REFERRAL SYSTEM INTEGRATION TESTS
+  // ============================================
+
+  describe("Referral System Integration", function () {
+    let signer:any;
+    // Additional signers for referral system
+    let referrer1: any;
+    let referrer2: any;
+    let referrer3: any;
+    let buyer1: any;
+    let buyer2: any;
+    let buyer3: any;
+
+    // Contract instances
+    let referralVoucher: any;
+    let referralModule: any;
+
+    // EIP-712 Domain
+    let domain: any;
+
+    // ============================================
+    // HELPER FUNCTIONS - EIP-712 VOUCHER GENERATION
+    // ============================================
+
+    /**
+     * Generate EIP-712 domain separator for ReferralVoucher contract
+     */
+    function getEIP712Domain(contractAddress: string, chainId: number) {
+      return {
+        name: "ReferralVoucher",
+        version: "1",
+        chainId: chainId,
+        verifyingContract: contractAddress,
+      };
+    }
+
+    /**
+     * EIP-712 type definition for ReferralVoucher
+     * MUST match ReferralVoucher.sol VOUCHER_TYPEHASH exactly
+     */
+    const VOUCHER_TYPES = {
+      ReferralVoucher: [
+        { name: "vid", type: "bytes32" },
+        { name: "codeHash", type: "bytes32" },
+        { name: "owner", type: "address" },
+        { name: "directBps", type: "uint16" },
+        { name: "transferOnUse", type: "bool" },
+        { name: "expiry", type: "uint64" },
+        { name: "maxUses", type: "uint32" },
+        { name: "nonce", type: "uint256" },
+      ],
+    };
+
+    /**
+     * Generate a signed referral voucher
+     * @param signer Signer (admin who creates vouchers)
+     * @param code Referral code (e.g., "CRYPTO50")
+     * @param referrer Address of the referrer (owner in contract)
+     * @param directBps Direct commission rate (e.g., 500 = 5%)
+     * @param transferOnUse If true, transfer commission immediately; else accrue
+     * @param maxUses Maximum number of uses (0 = unlimited)
+     * @param nonce Unique nonce for replay protection
+     * @param expiry Expiration timestamp (0 = never expires)
+     */
+  async function generateReferralVoucher(
+  signer: any,
+  code: string,
+  owner: string,  // Changed from "referrer"
+  directBps: number,
+  transferOnUse: boolean,
+  maxUses: number,  // NEW PARAMETER
+  nonce: number,
+  expiry: number
+) {
+  const codeHash = ethers.keccak256(ethers.toUtf8Bytes(code));
+  
+  // Generate unique voucher ID
+  const vid = ethers.keccak256(
+    ethers.solidityPacked(
+      ["bytes32", "address", "uint256"],
+      [codeHash, owner, nonce]
+    )
+  );
+
+  const voucher = {
+    vid,
+    codeHash,
+    owner,
+    directBps,
+    transferOnUse,
+    expiry,
+    maxUses,
+    nonce,
+  };
+
+  const signature = await signer.signTypedData(domain, VOUCHER_TYPES, voucher);
+
+  return { voucher, signature, codeHash, vid };
+}
+
+    /**
+     * Generate multiple vouchers for batch testing
+     */
+    async function generateVoucherBatch(
+      signer: any,
+      referrers: string[],
+      codes: string[],
+      directBpsArray: number[],
+      transferOnUse: boolean,
+      maxUses: number,
+      baseNonce: number,
+      expiry: number
+    ) {
+      const vouchers = [];
+      for (let i = 0; i < referrers.length; i++) {
+        const voucher = await generateReferralVoucher(
+          signer,
+          codes[i],
+          referrers[i],
+          directBpsArray[i],
+          transferOnUse,
+          maxUses,
+          baseNonce + i,
+          expiry
+        );
+        vouchers.push(voucher);
+      }
+      return vouchers;
+    }
+
+    // ============================================
+    // HELPER FUNCTIONS - OFF-CHAIN ENGINE SIMULATION
+    // ============================================
+
+    /**
+     * Data structure for storing reward claim events
+     */
+    interface RewardClaimEvent {
+      claimant: string;
+      poolId: number;
+      rewardAmount: bigint;
+      timestamp: number;
+      txHash: string;
+      blockNumber: number;
+    }
+
+    /**
+     * Storage for collected events
+     */
+    let collectedClaimEvents: RewardClaimEvent[] = [];
+
+    /**
+     * Listen to RewardClaimRecorded events and store in structured format
+     * @param filter Event filter (optional)
+     */
+    async function collectRewardClaimEvents(filter?: any) {
+      const events = await referralModule.queryFilter(
+        referralModule.filters.RewardClaimRecorded(),
+        filter?.fromBlock || 0,
+        filter?.toBlock || "latest"
+      );
+
+      for (const event of events) {
+        const { claimant, poolId, rewardAmount, timestamp } = event.args as any;
+        collectedClaimEvents.push({
+          claimant,
+          poolId: Number(poolId),
+          rewardAmount,
+          timestamp: Number(timestamp),
+          txHash: event.transactionHash,
+          blockNumber: event.blockNumber,
+        });
+      }
+
+      return collectedClaimEvents;
+    }
+
+    /**
+     * Commission entry for Merkle tree
+     */
+    interface CommissionEntry {
+      address: string;
+      token: string;
+      amount: bigint;
+      level: number;
+      claimEvents: number[]; // Indices of claim events
+    }
+
+    /**
+     * Calculate multi-level commissions for all claim events
+     * @param poolId Pool ID to calculate commissions for
+     * @param token Token address (ECM)
+     */
+    async function calculateMultiLevelCommissions(
+      poolId: number,
+      token: string
+    ): Promise<CommissionEntry[]> {
+      const commissions: Map<string, CommissionEntry> = new Map();
+
+      // Get pool-level multi-level configuration
+      const mlConfig = await referralModule.getPoolLevelConfig(poolId);
+      if (mlConfig.length === 0) {
+        console.log("⚠️  No multi-level config for pool", poolId);
+        return [];
+      }
+
+      console.log(`📊 Multi-level config for pool ${poolId}:`, mlConfig.map((bps: any) => Number(bps)));
+
+      // Process each claim event
+      for (let eventIdx = 0; eventIdx < collectedClaimEvents.length; eventIdx++) {
+        const event = collectedClaimEvents[eventIdx];
+        if (event.poolId !== poolId) continue;
+
+        // Get referral chain for claimant
+        const chain = await referralModule.getReferralChain(event.claimant, mlConfig.length);
+        console.log(`🔗 Referral chain for ${event.claimant}:`, chain);
+
+        // Calculate commission for each level in chain
+        for (let level = 0; level < mlConfig.length && level < chain.length; level++) {
+          const referrer = chain[level];
+          if (referrer === ethers.ZeroAddress) break;
+
+          const levelBps = mlConfig[level];
+          const commission = (event.rewardAmount * BigInt(levelBps)) / 10000n;
+
+          if (commission === 0n) continue;
+
+          // Aggregate commissions per referrer
+          const key = `${referrer}-${token}`;
+          if (commissions.has(key)) {
+            const entry = commissions.get(key)!;
+            entry.amount += commission;
+            entry.claimEvents.push(eventIdx);
+          } else {
+            commissions.set(key, {
+              address: referrer,
+              token,
+              amount: commission,
+              level: level + 1,
+              claimEvents: [eventIdx],
+            });
+          }
+        }
+      }
+
+      return Array.from(commissions.values());
+    }
+
+    /**
+     * Build Merkle tree from commission entries
+     * Uses keccak256(abi.encodePacked(address, token, amount, epochId))
+     */
+    function buildMerkleTree(commissions: CommissionEntry[], epochId: number) {
+
+      if (commissions.length === 0) {
+        throw new Error("Cannot build Merkle tree with no commissions");
+      }
+
+      // Create leaves: keccak256(abi.encodePacked(address, token, amount, epochId))
+      const leaves = commissions.map((entry) => {
+        const packed = ethers.solidityPacked(
+          ["address", "address", "uint256", "uint256"],
+          [entry.address, entry.token, entry.amount, epochId]
+        );
+        return keccak256(packed);
+      });
+
+      const tree = new MerkleTree(leaves, keccak256, { sortPairs: true });
+      const root = tree.getRoot();
+
+      // Generate proofs for each entry
+      const proofsMap = new Map<string, string[]>();
+      commissions.forEach((entry, idx) => {
+        const leaf = leaves[idx];
+        const proof = tree.getHexProof(leaf);
+        proofsMap.set(entry.address, proof);
+      });
+
+      return {
+        root: "0x" + root.toString("hex"),
+        tree,
+        proofs: proofsMap,
+        leaves,
+      };
+    }
+
+    /**
+     * Save epoch data to JSON file (for demonstration)
+     */
+    function saveEpochDataToJSON(
+      epochId: number,
+      commissions: CommissionEntry[],
+      merkleRoot: string,
+      proofs: Map<string, string[]>
+    ) {
+      const epochData = {
+        epochId,
+        merkleRoot,
+        totalCommissions: commissions.length,
+        totalAmount: commissions.reduce((sum, c) => sum + c.amount, 0n).toString(),
+        commissions: commissions.map((c) => ({
+          address: c.address,
+          token: c.token,
+          amount: c.amount.toString(),
+          level: c.level,
+          claimEvents: c.claimEvents,
+          proof: proofs.get(c.address),
+        })),
+        generatedAt: new Date().toISOString(),
+      };
+
+      console.log("\n📄 Epoch Data JSON:");
+      console.log(JSON.stringify(epochData, null, 2));
+
+      return epochData;
+    }
+
+    // ============================================
+    // SETUP
+    // ============================================
+
+    beforeEach(async function () {
+      // Get additional signers for referral system
+      const signers = await ethers.getSigners();
+      signer = signers[0];
+      referrer1 = signers[5];
+      referrer2 = signers[6];
+      referrer3 = signers[7];
+      buyer1 = signers[8];
+      buyer2 = signers[9];
+      buyer3 = signers[10];
+
+      // Deploy ReferralVoucher
+      const ReferralVoucher = await ethers.getContractFactory("ReferralVoucher");
+      referralVoucher = await ReferralVoucher.deploy();
+      await referralVoucher.waitForDeployment();
+
+      // Deploy ReferralModule
+      const ReferralModule = await ethers.getContractFactory("ReferralModule");
+      referralModule = await ReferralModule.deploy();
+      await referralModule.waitForDeployment();
+
+      // Setup EIP-712 domain
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      domain = getEIP712Domain(await referralVoucher.getAddress(), Number(chainId));
+
+      // Configure integrations
+      await referralVoucher.setPoolManager(poolManager.target);
+      await referralModule.setPoolManager(poolManager.target);
+      await poolManager.setReferralVoucher(referralVoucher.target);
+      await poolManager.setReferralModule(referralModule.target);
+
+      // Add owner as authorized issuer for vouchers
+      await referralVoucher.addIssuer(owner.address);
+
+      // Setup pool with allocations
+      await createDefaultPool();
+      await allocateTokensToPool(0);
+
+      // Set LINEAR reward rate
+      await poolManager.setLinearRewardRate(0);
+
+      // Fund ReferralModule with ECM for direct commissions
+      const fundAmount = parseEther("100000"); // 100K ECM
+      await ecmToken.approve(referralModule.target, fundAmount);
+      await referralModule.fundContract(ecmToken.target, fundAmount);
+
+      // Reset event collection
+      collectedClaimEvents = [];
+
+      // Setup name tags for tracing
+      hre.tracer.nameTags[await referralVoucher.getAddress()] = "ReferralVoucher";
+      hre.tracer.nameTags[await referralModule.getAddress()] = "ReferralModule";
+      hre.tracer.nameTags[referrer1.address] = "Referrer1";
+      hre.tracer.nameTags[referrer2.address] = "Referrer2";
+      hre.tracer.nameTags[referrer3.address] = "Referrer3";
+      hre.tracer.nameTags[buyer1.address] = "Buyer1";
+      hre.tracer.nameTags[buyer2.address] = "Buyer2";
+      hre.tracer.nameTags[buyer3.address] = "Buyer3";
+    });
+
+    // ============================================
+    // TEST CASES
+    // ============================================
+
+    describe("EIP-712 Voucher Generation & Verification", function () {
+      it("Should generate valid EIP-712 voucher signature", async function () {
+        const code = "CRYPTO50";
+        const directBps = 500; // 5%
+        const maxUses = 1; // Single-use voucher
+        const nonce = 1;
+        const expiry = (await getCurrentTimestamp()) + 86400; // 24 hours
+
+        const { voucher, signature, codeHash, vid } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Verify signature off-chain
+        const recovered = ethers.verifyTypedData(domain, VOUCHER_TYPES, voucher, signature);
+        expect(recovered).to.equal(owner.address);
+
+        // Verify voucher structure
+        expect(voucher.codeHash).to.equal(codeHash);
+        expect(voucher.owner).to.equal(referrer1.address);
+        expect(voucher.directBps).to.equal(directBps);
+        expect(voucher.maxUses).to.equal(maxUses);
+        expect(voucher.nonce).to.equal(nonce);
+        expect(voucher.vid).to.equal(vid);
+
+        console.log("✅ Generated valid voucher with vid:", vid);
+      });
+
+      it("Should generate batch of vouchers with different commission rates", async function () {
+        const codes = ["CRYPTO50", "WHALE100", "NEWBIE25"];
+        const referrers = [referrer1.address, referrer2.address, referrer3.address];
+        const directBpsArray = [500, 1000, 250]; // 5%, 10%, 2.5%
+        const maxUses = 1;
+        const baseNonce = 100;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const vouchers = await generateVoucherBatch(
+          owner,
+          referrers,
+          codes,
+          directBpsArray,
+          true,
+          maxUses,
+          baseNonce,
+          expiry
+        );
+
+        expect(vouchers.length).to.equal(3);
+
+        // Verify all vouchers
+        for (let i = 0; i < vouchers.length; i++) {
+          const { voucher, signature } = vouchers[i];
+          const recovered = ethers.verifyTypedData(domain, VOUCHER_TYPES, voucher, signature);
+          expect(recovered).to.equal(owner.address);
+          expect(voucher.directBps).to.equal(directBpsArray[i]);
+        }
+      });
+
+      it("Should reject voucher with invalid signature", async function () {
+        const code = "CRYPTO50";
+        const directBps = 500;
+        const maxUses = 1;
+        const nonce = 1;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature, codeHash } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Tamper with voucher
+        const tamperedVoucher = { ...voucher, directBps: 1000 };
+
+        // Off-chain verification should fail
+        const tamperedSig = signature; // Same signature won't match tampered data
+        const recovered = ethers.verifyTypedData(domain, VOUCHER_TYPES, tamperedVoucher, tamperedSig);
+        expect(recovered).to.not.equal(owner.address);
+      });
+
+      it("Should reject expired voucher", async function () {
+        const code = "EXPIRED";
+        const directBps = 500;
+        const maxUses = 1;
+        const nonce = 2;
+        const expiry = (await getCurrentTimestamp()) - 1; // Already expired
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Signature is valid
+        const recovered = ethers.verifyTypedData(domain, VOUCHER_TYPES, voucher, signature);
+        expect(recovered).to.equal(owner.address);
+
+        // But buyAndStake should reject due to expiry
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await expect(
+          poolManager.connect(buyer1).buyAndStake(
+            0,
+            parseUnits("1000", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          )
+        ).to.be.revertedWithCustomError(referralVoucher, "VoucherExpired");
+      });
+    });
+
+    describe("End-to-End Referral Flow", function () {
+      it("Should execute complete referral flow: voucher → buy → direct commission → stake → rewards → claim", async function () {
+        // Step 1: Generate voucher
+        const code = "CRYPTO50";
+        const directBps = 500; // 5% direct commission
+        const maxUses = 1;
+        const nonce = 10;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature, codeHash } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          true, // transferOnUse = true (immediate transfer)
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Step 2: Setup buyer
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        const referrerBalanceBefore = await ecmToken.balanceOf(referrer1.address);
+
+        // Step 3: Buy with referral voucher
+        const tx = await poolManager.connect(buyer1).buyAndStake(
+          0, // poolId
+          parseUnits("1000", 6), // maxUsdtAmount
+          THIRTY_DAYS, // stakeDuration
+          voucher,
+          signature
+        );
+
+        const receipt = await tx.wait();
+
+        // Verify referrer linked
+        expect(await referralModule.getReferrer(buyer1.address)).to.equal(referrer1.address);
+
+        // Verify direct commission paid
+        const referrerBalanceAfter = await ecmToken.balanceOf(referrer1.address);
+        const userInfo = await poolManager.getUserInfo(0, buyer1.address);
+        const expectedCommission = (userInfo.staked * BigInt(directBps)) / 10000n;
+        expect(referrerBalanceAfter - referrerBalanceBefore).to.equal(expectedCommission);
+
+        // Step 4: Wait for rewards to accrue
+        await time.increase(THIRTY_DAYS / 2); // Wait 15 days
+
+        // Step 5: Claim rewards
+        const pendingBefore = await poolManager.pendingRewards(0, buyer1.address);
+        expect(pendingBefore).to.be.gt(0n);
+
+        const claimTx = await poolManager.connect(buyer1).claimRewards(0);
+        await claimTx.wait();
+
+        // Verify RewardClaimRecorded event emitted
+        const claimEvents = await referralModule.queryFilter(
+          referralModule.filters.RewardClaimRecorded()
+        );
+        expect(claimEvents.length).to.equal(1);
+        expect(claimEvents[0].args?.claimant).to.equal(buyer1.address);
+        expect(claimEvents[0].args?.rewardAmount).to.gte(pendingBefore);
+
+        console.log("✅ Complete referral flow executed successfully");
+      });
+
+      it("Should handle accrual mode (transferOnUse = false) and withdrawal", async function () {
+        // Generate voucher with accrual mode
+        const code = "SAVE100";
+        const directBps = 1000; // 10%
+        const maxUses = 1;
+        const nonce = 20;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          false, // transferOnUse = false (accrue)
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Setup buyer
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        // Buy with referral
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          voucher,
+          signature
+        );
+
+        // Check accrued balance
+        const userInfo = await poolManager.getUserInfo(0, buyer1.address);
+        const expectedCommission = (userInfo.staked * BigInt(directBps)) / 10000n;
+        const accrued = await referralModule.getDirectAccrual(referrer1.address);
+        expect(accrued).to.equal(expectedCommission);
+
+        // Withdraw accrued amount
+        const balanceBefore = await ecmToken.balanceOf(referrer1.address);
+        await referralModule.connect(referrer1).withdrawDirectAccrual(0); // 0 = withdraw all
+
+        const balanceAfter = await ecmToken.balanceOf(referrer1.address);
+        expect(balanceAfter - balanceBefore).to.equal(expectedCommission);
+        expect(await referralModule.getDirectAccrual(referrer1.address)).to.equal(0n);
+      });
+    });
+
+    describe("Multi-Level Commission Calculation & Merkle Distribution", function () {
+      beforeEach(async function () {
+        // Configure multi-level commissions for pool 0
+        // Level 1: 3%, Level 2: 2%, Level 3: 1%
+        const mlBps = [300, 200, 100];
+        await referralModule.setPoolLevelConfig(0, mlBps);
+      });
+
+      it("Should calculate multi-level commissions and generate Merkle tree", async function () {
+        // Build referral chain: buyer1 → referrer1 → referrer2 → referrer3
+        const code1 = "REF1";
+        const maxUses = 1;
+        const nonce1 = 10;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        // Voucher for buyer1 (referrer = referrer1)
+        const { voucher: v1, signature: s1 } = await generateReferralVoucher(
+          owner,
+          code1,
+          referrer1.address,
+          500, // 5% direct
+          true,
+          maxUses,
+          nonce1,
+          expiry
+        );
+
+        // Setup and buy
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          v1,
+          s1
+        );
+
+        // Manually set up referral chain (for testing)
+        // In production, this would happen through sequential buys with vouchers
+        await referralModule.linkReferrer(referrer1.address, referrer2.address, ethers.keccak256(ethers.toUtf8Bytes("REF2")));
+        await referralModule.linkReferrer(referrer2.address, referrer3.address, ethers.keccak256(ethers.toUtf8Bytes("REF3")));
+
+        // Accrue rewards and claim
+        await time.increase(THIRTY_DAYS);
+        const pendingRewards = await poolManager.pendingRewards(0, buyer1.address);
+        const tx = await poolManager.connect(buyer1).claimRewards(0);
+        const receipt = await tx.wait();
+      
+      // Find EarlyUnstaked event
+      const event = receipt?.logs
+        .map((log: any) => {
+          try {
+            return poolManager.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
+        .find((e: any) => e && e.name === "RewardsClaimed");
+      
+      expect(event).to.not.be.undefined;
+      expect(event?.args[0]).to.equal(0); // poolId
+      expect(event?.args[1]).to.equal(buyer1.address); // user
+      const claimedRewards = event?.args[2];
+    
+
+        // Collect events
+        await collectRewardClaimEvents();
+        expect(collectedClaimEvents.length).to.equal(1);
+        console.log("📋 Collected claim events:", collectedClaimEvents.length);
+
+        // Calculate multi-level commissions
+        const commissions = await calculateMultiLevelCommissions(0, ecmToken.target);
+        console.log("💰 Calculated commissions:", commissions.length);
+
+        expect(commissions.length).to.equal(3); // 3 levels
+
+        // Verify commission amounts
+        const mlConfig = [300, 200, 100]; // 3%, 2%, 1%
+        const expectedCommissions = mlConfig.map((bps) => (claimedRewards * BigInt(bps)) / 10000n);
+
+        const ref1Commission = commissions.find((c) => c.address === referrer1.address);
+        const ref2Commission = commissions.find((c) => c.address === referrer2.address);
+        const ref3Commission = commissions.find((c) => c.address === referrer3.address);
+
+        expect(ref1Commission?.amount).to.equal(expectedCommissions[0]);
+        expect(ref2Commission?.amount).to.equal(expectedCommissions[1]);
+        expect(ref3Commission?.amount).to.equal(expectedCommissions[2]);
+
+        // Build Merkle tree
+        const epochId = 1;
+        const { root, proofs } = buildMerkleTree(commissions, epochId);
+        console.log("🌳 Merkle root:", root);
+
+        expect(root).to.not.equal("0x" + "00".repeat(32));
+        expect(proofs.size).to.equal(3);
+
+        // Save to JSON (demonstration)
+        const epochData = saveEpochDataToJSON(epochId, commissions, root, proofs);
+        expect(epochData.totalCommissions).to.equal(3);
+      });
+
+      it("Should submit Merkle root and allow claims", async function () {
+        // Setup referral chain and generate claims (same as previous test)
+        const code1 = "REF1";
+        const maxUses = 1;
+        const nonce1 = 20;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher: v1, signature: s1 } = await generateReferralVoucher(
+          owner,
+          code1,
+          referrer1.address,
+          500,
+          true,
+          maxUses,
+          nonce1,
+          expiry
+        );
+
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          v1,
+          s1
+        );
+
+        await referralModule.linkReferrer(referrer1.address, referrer2.address, ethers.keccak256(ethers.toUtf8Bytes("REF2")));
+        await referralModule.linkReferrer(referrer2.address, referrer3.address, ethers.keccak256(ethers.toUtf8Bytes("REF3")));
+
+        await time.increase(THIRTY_DAYS);
+        await poolManager.connect(buyer1).claimRewards(0);
+
+        await collectRewardClaimEvents();
+        const commissions = await calculateMultiLevelCommissions(0, ecmToken.target);
+        const epochId = 1;
+        const { root, proofs } = buildMerkleTree(commissions, epochId);
+
+        // Calculate total amount needed
+        const totalAmount = commissions.reduce((sum, c) => sum + c.amount, 0n);
+
+        // Fund ReferralModule with additional ECM for multi-level payouts
+        await ecmToken.approve(referralModule.target, totalAmount);
+        await referralModule.fundContract(ecmToken.target, totalAmount);
+
+        // Submit Merkle root
+        const expiryTime = (await getCurrentTimestamp()) + 86400 * 30; // 30 days
+        await referralModule.submitReferralPayoutRoot(
+          epochId,
+          ecmToken.target,
+          totalAmount,
+          root,
+          expiryTime
+        );
+
+        // Verify root submitted
+        const rootInfo = await referralModule.getPayoutRootInfo(epochId);
+        expect(rootInfo.root).to.equal(root);
+        expect(rootInfo.totalAmount).to.equal(totalAmount);
+        expect(rootInfo.funded).to.be.true;
+
+        // Each referrer claims their commission
+        for (const commission of commissions) {
+          const proof = proofs.get(commission.address)!;
+          const balanceBefore = await ecmToken.balanceOf(commission.address);
+
+          await referralModule.connect(
+            // Find signer by address
+            [referrer1, referrer2, referrer3].find((s) => s.address === commission.address)
+          ).claimReferral(epochId, ecmToken.target, commission.amount, proof);
+
+          const balanceAfter = await ecmToken.balanceOf(commission.address);
+          expect(balanceAfter - balanceBefore).to.equal(commission.amount);
+
+          // Verify marked as claimed
+          expect(await referralModule.hasClaimed(epochId, commission.address)).to.be.true;
+        }
+
+        console.log("✅ All multi-level commissions claimed successfully");
+      });
+
+      it("Should handle multiple buyers and aggregate commissions", async function () {
+        // Setup 3 buyers with same referrer
+        const buyers = [buyer1, buyer2, buyer3];
+        const codes = ["BUY1", "BUY2", "BUY3"];
+
+        for (let i = 0; i < buyers.length; i++) {
+          const { voucher, signature } = await generateReferralVoucher(
+            owner,
+            codes[i],
+            referrer1.address,
+            500,
+            true,
+            1, // maxUses
+            30 + i,
+            (await getCurrentTimestamp()) + 86400
+          );
+
+          await setupUser(buyers[i], 0n, parseUnits("10000", 6));
+          await usdtToken.connect(buyers[i]).approve(poolManager.target, parseUnits("10000", 6));
+
+          await poolManager.connect(buyers[i]).buyAndStake(
+            0,
+            parseUnits("1000", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          );
+        }
+
+        // All claim rewards
+        await time.increase(THIRTY_DAYS);
+        for (const buyer of buyers) {
+          await poolManager.connect(buyer).claimRewards(0);
+        }
+
+        // Collect and calculate
+        await collectRewardClaimEvents();
+        expect(collectedClaimEvents.length).to.equal(3);
+
+        const commissions = await calculateMultiLevelCommissions(0, ecmToken.target);
+        expect(commissions.length).to.equal(1); // Only referrer1 (no chain)
+
+        // Verify aggregated amount
+        const mlConfig = await referralModule.getPoolLevelConfig(0);
+        const totalExpected = collectedClaimEvents.reduce((sum, event) => {
+          return sum + (event.rewardAmount * BigInt(mlConfig[0])) / 10000n;
+        }, 0n);
+
+        expect(commissions[0].amount).to.equal(totalExpected);
+        expect(commissions[0].claimEvents.length).to.equal(3);
+
+        console.log("✅ Aggregated commissions from multiple buyers");
+      });
+    });
+
+    describe("Edge Cases & Security", function () {
+      beforeEach(async function () {
+        // Configure multi-level commissions for pool 0
+        // Level 1: 3%, Level 2: 2%, Level 3: 1%
+        const mlBps = [300, 200, 100];
+        await referralModule.setPoolLevelConfig(0, mlBps);
+      });
+      it("Should prevent self-referral", async function () {
+        const code = "SELF";
+        const maxUses = 1;
+        const nonce = 100;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        // Generate voucher with buyer as referrer (self-referral)
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          buyer1.address, // Self-referral
+          500,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await expect(
+          poolManager.connect(buyer1).buyAndStake(
+            0,
+            parseUnits("1000", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          )
+        ).to.be.revertedWithCustomError(referralModule, "SelfReferral");
+      });
+
+      it("Should prevent cyclic referrals (2-person loop)", async function () {
+        // buyer1 refers buyer2
+        const code1 = "CYCLE1";
+        const maxUses1 = 1;
+        const { voucher: v1, signature: s1 } = await generateReferralVoucher(
+          owner,
+          code1,
+          buyer1.address,
+          500,
+          true,
+          maxUses1,
+          200,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await setupUser(buyer2, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer2).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer2).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          v1,
+          s1
+        );
+
+        // Now buyer2 tries to refer buyer1 (cycle)
+        const code2 = "CYCLE2";
+        const maxUses2 = 1;
+        const { voucher: v2, signature: s2 } = await generateReferralVoucher(
+          owner,
+          code2,
+          buyer2.address,
+          500,
+          true,
+          maxUses2,
+          201,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await expect(
+          poolManager.connect(buyer1).buyAndStake(
+            0,
+            parseUnits("1000", 6),
+            THIRTY_DAYS,
+            v2,
+            s2
+          )
+        ).to.be.revertedWithCustomError(referralModule, "CyclicReferral");
+      });
+
+      it("Should reject voucher when max uses reached", async function () {
+        const code = "LIMITED";
+        const maxUses = 1; // Single-use voucher
+        const nonce = 300;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          500,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // First use - should succeed
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("500", 6),
+          THIRTY_DAYS,
+          voucher,
+          signature
+        );
+
+        // Second use with SAME voucher (should fail - max uses reached)
+        await setupUser(buyer2, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer2).approve(poolManager.target, parseUnits("10000", 6));
+
+        await expect(
+          poolManager.connect(buyer2).buyAndStake(
+            0,
+            parseUnits("500", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          )
+        ).to.be.revertedWithCustomError(referralVoucher, "MaxUsesReached");
+      });
+
+      it("Should allow unlimited uses when maxUses = 0", async function () {
+        const code = "UNLIMITED";
+        const maxUses = 0; // Unlimited uses
+        const nonce = 400;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          500,
+          true,
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Multiple users can use the same voucher
+        const buyers = [buyer1, buyer2, buyer3];
+        
+        for (const buyer of buyers) {
+          await setupUser(buyer, 0n, parseUnits("10000", 6));
+          await usdtToken.connect(buyer).approve(poolManager.target, parseUnits("10000", 6));
+
+          await poolManager.connect(buyer).buyAndStake(
+            0,
+            parseUnits("500", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          );
+
+          // Verify referrer was linked
+          expect(await referralModule.getReferrer(buyer.address)).to.equal(referrer1.address);
+        }
+
+        console.log("✅ All 3 buyers successfully used the same unlimited voucher");
+      });
+
+      it("Should handle insufficient ReferralModule balance for direct commission", async function () {
+        // Drain ReferralModule balance
+        const moduleBalance = await ecmToken.balanceOf(referralModule.target);
+        await referralModule.emergencyRecoverTokens(ecmToken.target, moduleBalance, owner.address);
+
+        const code = "DRAIN";
+        const maxUses = 1;
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          500,
+          true, // transferOnUse = true (requires balance)
+          maxUses,
+          400,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await expect(
+          poolManager.connect(buyer1).buyAndStake(
+            0,
+            parseUnits("1000", 6),
+            THIRTY_DAYS,
+            voucher,
+            signature
+          )
+        ).to.be.revertedWithCustomError(referralModule, "InsufficientBalance");
+      });
+
+      it("Should reject invalid Merkle proof", async function () {
+        const epochId = 100;
+        const fakeProof = [ethers.keccak256(ethers.toUtf8Bytes("fake"))];
+
+        // Submit a valid root first
+        await ecmToken.approve(referralModule.target, parseEther("1000"));
+        await referralModule.fundContract(ecmToken.target, parseEther("1000"));
+
+        await referralModule.submitReferralPayoutRoot(
+          epochId,
+          ecmToken.target,
+          parseEther("1000"),
+          ethers.keccak256(ethers.toUtf8Bytes("validroot")),
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        // Try to claim with invalid proof
+        await expect(
+          referralModule.connect(referrer1).claimReferral(
+            epochId,
+            ecmToken.target,
+            parseEther("100"),
+            fakeProof
+          )
+        ).to.be.revertedWithCustomError(referralModule, "InvalidProof");
+      });
+
+      it("Should prevent double claiming in same epoch", async function () {
+        // Setup and claim (full flow from previous test)
+        const code1 = "DOUBLE";
+        const maxUses = 1;
+        const { voucher: v1, signature: s1 } = await generateReferralVoucher(
+          owner,
+          code1,
+          referrer1.address,
+          500,
+          true,
+          maxUses,
+          500,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          v1,
+          s1
+        );
+
+        // Setup referral chain: buyer1 → referrer1 → referrer2 → referrer3
+        await referralModule.linkReferrer(referrer1.address, referrer2.address, ethers.keccak256(ethers.toUtf8Bytes("REF2")));
+        await referralModule.linkReferrer(referrer2.address, referrer3.address, ethers.keccak256(ethers.toUtf8Bytes("REF3")));
+
+        await time.increase(THIRTY_DAYS);
+        await poolManager.connect(buyer1).claimRewards(0);
+
+        await collectRewardClaimEvents();
+        const commissions = await calculateMultiLevelCommissions(0, ecmToken.target);
+        console.log("💰 Calculated commissions for double claim test:", commissions.length);
+        
+        // Verify we have commissions (should be 3 for 3-level chain)
+        expect(commissions.length).to.be.gt(0, "No commissions calculated - referral chain not set up correctly");
+        
+        const epochId = 200;
+        const { root, proofs } = buildMerkleTree(commissions, epochId);
+
+        const totalAmount = commissions.reduce((sum, c) => sum + c.amount, 0n);
+        await ecmToken.approve(referralModule.target, totalAmount);
+        await referralModule.fundContract(ecmToken.target, totalAmount);
+
+        await referralModule.submitReferralPayoutRoot(
+          epochId,
+          ecmToken.target,
+          totalAmount,
+          root,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        // First claim
+        const commission = commissions[0];
+        const proof = proofs.get(commission.address)!;
+        await referralModule.connect(referrer1).claimReferral(
+          epochId,
+          ecmToken.target,
+          commission.amount,
+          proof
+        );
+
+        // Second claim (should fail)
+        await expect(
+          referralModule.connect(referrer1).claimReferral(
+            epochId,
+            ecmToken.target,
+            commission.amount,
+            proof
+          )
+        ).to.be.revertedWithCustomError(referralModule, "AlreadyClaimed");
       });
     });
   });
