@@ -192,7 +192,9 @@ await usdt.connect(user).approve(poolManager.target, ethers.parseUnits("10000", 
 await poolManager.connect(user).buyAndStake(
   poolId,
   ethers.parseUnits("10000", 6), // Max 10,000 USDT
-  30 * 24 * 60 * 60 // 30-day stake duration
+  30 * 24 * 60 * 60, // 30-day stake duration
+  IReferralVoucher.VoucherInput calldata voucherInput,
+  bytes calldata voucherSignature
 );
 
 // Alternative: Buy exact ECM amount
@@ -200,7 +202,9 @@ await poolManager.connect(user).buyExactECMAndStake(
   poolId,
   ethers.parseEther("5000"), // Exactly 5000 ECM
   ethers.parseUnits("10000", 6), // Max USDT willing to spend
-  30 * 24 * 60 * 60
+  30 * 24 * 60 * 60,
+  IReferralVoucher.VoucherInput calldata voucherInput,
+  bytes calldata voucherSignature
 );
 ```
 
