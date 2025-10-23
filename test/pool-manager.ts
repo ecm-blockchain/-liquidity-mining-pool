@@ -1788,6 +1788,573 @@ describe("PoolManager & VestingManager", function () {
         ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
       });
     });
+
+    describe.only("Reward Strategy Behavior", function () {
+      describe("LINEAR Strategy", function () {
+        it("Should accrue rewards continuously at constant rate per second", async function () {
+          const poolId = await createDefaultPool(); // Creates LINEAR strategy by default
+          
+          // Allocate tokens
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Set linear reward rate (auto-calculated based on allocation and maxDuration)
+          await poolManager.setLinearRewardRate(poolId);
+          
+          const poolInfo = await poolManager.getPoolInfo(poolId);
+          const rewardRate = poolInfo.rewardRatePerSecond;
+          expect(rewardRate).to.be.gt(0);
+          
+          // User1 buys and stakes
+          const stakeAmount = parseEther("5000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, THIRTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // Wait 7 days
+          const timeElapsed1 = 7 * 24 * 3600;
+          await time.increase(timeElapsed1);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          expect(pending1).to.be.gt(0);
+          
+          // Calculate expected rewards: rewardRate * timeElapsed * userStake / totalStaked
+          // Since user1 is the only staker, they get all rewards
+          const expectedRewards1 = BigInt(timeElapsed1) * rewardRate;
+          
+          // Allow 0.1% tolerance for precision
+          const tolerance1 = expectedRewards1 / 1000n;
+          expect(pending1).to.be.gte(expectedRewards1 - tolerance1);
+          expect(pending1).to.be.lte(expectedRewards1 + tolerance1);
+          
+          // Wait another 7 days
+          const timeElapsed2 = 7 * 24 * 3600;
+          await time.increase(timeElapsed2);
+          
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          const expectedRewards2 = BigInt(timeElapsed1 + timeElapsed2) * rewardRate;
+          
+          const tolerance2 = expectedRewards2 / 1000n;
+          expect(pending2).to.be.gte(expectedRewards2 - tolerance2);
+          expect(pending2).to.be.lte(expectedRewards2 + tolerance2);
+          
+          // Verify linear growth
+          expect(pending2).to.be.gt(pending1);
+          expect(pending2).to.be.approximately(pending1 * 2n, pending1 / 10n); // ~2x after double time
+        });
+
+        it("Should distribute LINEAR rewards proportionally among multiple stakers", async function () {
+          const poolId = await createDefaultPool();
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          await poolManager.setLinearRewardRate(poolId);
+          
+          // User1 stakes 6000 ECM
+          const stake1 = parseEther("6000");
+          const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
+          await usdtToken.connect(user1).approve(poolManager.target, usdt1);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, NINETY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // Wait 3 days
+          await time.increase(3 * 24 * 3600);
+          
+          // User2 stakes 3000 ECM
+          const stake2 = parseEther("3000");
+          const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
+          await usdtToken.connect(user2).approve(poolManager.target, usdt2);
+          await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, NINETY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // Wait 6 days
+          await time.increase(6 * 24 * 3600);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          const pending2 = await poolManager.pendingRewards(poolId, user2.address);
+          
+          // User1 should have more rewards (staked longer + more amount)
+          expect(pending1).to.be.gt(pending2);
+          
+          // User1 has 2x stake of user2, so after the same duration (6 days),
+          // user1 should get ~2x rewards of user2 for overlapping period
+          // Plus user1 had 3 days solo: (3 days solo + 6 days at 66.67%) / (6 days at 33.33%) ≈ 3.5x
+          const ratio = (pending1 * 1000n) / pending2;
+          expect(ratio).to.be.gt(3000n); // At least 3x (user1 had solo period + 2x stake)
+          expect(ratio).to.be.lt(4000n); // Less than 4x
+        });
+
+        it("Should handle LINEAR rewards when users stake at different times", async function () {
+          const poolId = await createDefaultPool();
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          await poolManager.setLinearRewardRate(poolId);
+          
+          const poolInfo = await poolManager.getPoolInfo(poolId);
+          const rewardRate = poolInfo.rewardRatePerSecond;
+          
+          // User1 stakes
+          const stake1 = parseEther("4000");
+          const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
+          await usdtToken.connect(user1).approve(poolManager.target, usdt1);
+          const tx1 = await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          const receipt1 = await tx1.wait();
+          const timestamp1 = (await ethers.provider.getBlock(receipt1?.blockNumber!))?.timestamp!;
+          
+          // User1 solo for 10 days
+          await time.increase(10 * 24 * 3600);
+          
+          // User2 stakes same amount
+          const stake2 = parseEther("4000");
+          const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
+          await usdtToken.connect(user2).approve(poolManager.target, usdt2);
+          const tx2 = await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // Both stake for 5 more days
+          await time.increase(5 * 24 * 3600);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          const pending2 = await poolManager.pendingRewards(poolId, user2.address);
+          
+          // User1 should have significantly more (10 days solo + 5 days shared)
+          expect(pending1).to.be.gt(pending2);
+          
+          // User2 only gets rewards for 5 days at 50% share
+          // User1 gets 10 days at 100% + 5 days at 50% = 12.5 units
+          // User2 gets 5 days at 50% = 2.5 units
+          // Ratio: 2.5/12.5 = 20%
+          const ratio = (pending2 * 100n) / pending1;
+          expect(ratio).to.be.gt(15n); // At least 15% (accounting for precision)
+          expect(ratio).to.be.lt(25n); // Less than 25%
+        });
+      });
+
+      describe("WEEKLY Strategy", function () {
+        it("Should distribute weekly rewards in discrete chunks", async function () {
+          const poolId = await createPoolWithStrategy(2); // WEEKLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Set weekly rewards: 4 weeks with different amounts
+          const week1 = parseEther("10000");
+          const week2 = parseEther("15000");
+          const week3 = parseEther("12000");
+          const week4 = parseEther("8000");
+          const weeklyRewards = [week1, week2, week3, week4];
+          
+          await poolManager.setWeeklyRewards(poolId, weeklyRewards);
+          
+          // User stakes
+          const stakeAmount = parseEther("5000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 3 days (mid-week 1)
+          await time.increase(3 * 24 * 3600);
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have partial week1 rewards
+          expect(pending1).to.be.gt(0);
+          expect(pending1).to.be.lt(week1);
+          
+          // After 7 days total (end of week 1)
+          await time.increase(4 * 24 * 3600);
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have full week1 rewards
+          const tolerance1 = week1 / 100n; // 1% tolerance
+          expect(pending2).to.be.gte(week1 - tolerance1);
+          expect(pending2).to.be.lte(week1 + tolerance1);
+          
+          // After 14 days total (end of week 2)
+          await time.increase(7 * 24 * 3600);
+          const pending3 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have week1 + week2 rewards
+          const expectedTotal2 = week1 + week2;
+          const tolerance2 = expectedTotal2 / 100n;
+          expect(pending3).to.be.gte(expectedTotal2 - tolerance2);
+          expect(pending3).to.be.lte(expectedTotal2 + tolerance2);
+          
+          // After 21 days total (end of week 3)
+          await time.increase(7 * 24 * 3600);
+          const pending4 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have week1 + week2 + week3 rewards
+          const expectedTotal3 = week1 + week2 + week3;
+          const tolerance3 = expectedTotal3 / 100n;
+          expect(pending4).to.be.gte(expectedTotal3 - tolerance3);
+          expect(pending4).to.be.lte(expectedTotal3 + tolerance3);
+        });
+
+        it("Should distribute WEEKLY rewards proportionally among multiple stakers", async function () {
+          const poolId = await createPoolWithStrategy(2); // WEEKLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          const weeklyRewards = [
+            parseEther("20000"),
+            parseEther("20000"),
+            parseEther("20000"),
+          ];
+          await poolManager.setWeeklyRewards(poolId, weeklyRewards);
+          
+          // User1 stakes 7500 ECM
+          const stake1 = parseEther("7500");
+          const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
+          await usdtToken.connect(user1).approve(poolManager.target, usdt1);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // User2 stakes 2500 ECM (1/3 of user1)
+          const stake2 = parseEther("2500");
+          const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
+          await usdtToken.connect(user2).approve(poolManager.target, usdt2);
+          await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 1 week
+          await time.increase(7 * 24 * 3600);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          const pending2 = await poolManager.pendingRewards(poolId, user2.address);
+          
+          // User1 should get 75% of rewards, user2 should get 25%
+          const totalPending = pending1 + pending2;
+          const week1Rewards = weeklyRewards[0];
+          
+          // Total should be close to week1 rewards
+          const totalTolerance = week1Rewards / 100n;
+          expect(totalPending).to.be.gte(week1Rewards - totalTolerance);
+          expect(totalPending).to.be.lte(week1Rewards + totalTolerance);
+          
+          // Check proportions
+          const user1Share = (pending1 * 1000n) / totalPending;
+          const user2Share = (pending2 * 1000n) / totalPending;
+          
+          expect(user1Share).to.be.approximately(750n, 20n); // ~75% (750/1000)
+          expect(user2Share).to.be.approximately(250n, 20n); // ~25% (250/1000)
+        });
+
+        it("Should stop accruing WEEKLY rewards after schedule ends", async function () {
+          const poolId = await createPoolWithStrategy(2); // WEEKLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Only 2 weeks of rewards
+          const weeklyRewards = [
+            parseEther("5000"),
+            parseEther("5000"),
+          ];
+          await poolManager.setWeeklyRewards(poolId, weeklyRewards);
+          
+          // User stakes
+          const stakeAmount = parseEther("3000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 14 days (2 weeks - end of schedule)
+          await time.increase(14 * 24 * 3600);
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          const totalWeeklyRewards = weeklyRewards[0] + weeklyRewards[1];
+          const tolerance1 = totalWeeklyRewards / 100n;
+          expect(pending1).to.be.gte(totalWeeklyRewards - tolerance1);
+          expect(pending1).to.be.lte(totalWeeklyRewards + tolerance1);
+          
+          // After 21 days (3 weeks - beyond schedule)
+          await time.increase(7 * 24 * 3600);
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should still be the same as week 2 end (no new rewards)
+          expect(pending2).to.be.approximately(pending1, pending1 / 100n);
+        });
+      });
+
+      describe("MONTHLY Strategy", function () {
+        it("Should distribute monthly rewards in discrete chunks", async function () {
+          const poolId = await createPoolWithStrategy(1); // MONTHLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Set monthly rewards: 6 months with different amounts
+          const month1 = parseEther("50000");
+          const month2 = parseEther("60000");
+          const month3 = parseEther("55000");
+          const month4 = parseEther("45000");
+          const month5 = parseEther("40000");
+          const month6 = parseEther("35000");
+          const monthlyRewards = [month1, month2, month3, month4, month5, month6];
+          
+          await poolManager.setMonthlyRewards(poolId, monthlyRewards);
+          
+          // User stakes
+          const stakeAmount = parseEther("10000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 15 days (mid-month 1)
+          await time.increase(15 * 24 * 3600);
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have partial month1 rewards
+          expect(pending1).to.be.gt(0);
+          expect(pending1).to.be.lt(month1);
+          
+          // After 30 days (end of month 1)
+          await time.increase(15 * 24 * 3600);
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have full month1 rewards
+          const tolerance1 = month1 / 100n; // 1% tolerance
+          expect(pending2).to.be.gte(month1 - tolerance1);
+          expect(pending2).to.be.lte(month1 + tolerance1);
+          
+          // After 60 days (end of month 2)
+          await time.increase(30 * 24 * 3600);
+          const pending3 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have month1 + month2 rewards
+          const expectedTotal2 = month1 + month2;
+          const tolerance2 = expectedTotal2 / 100n;
+          expect(pending3).to.be.gte(expectedTotal2 - tolerance2);
+          expect(pending3).to.be.lte(expectedTotal2 + tolerance2);
+          
+          // After 90 days (end of month 3)
+          await time.increase(30 * 24 * 3600);
+          const pending4 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should have month1 + month2 + month3 rewards
+          const expectedTotal3 = month1 + month2 + month3;
+          const tolerance3 = expectedTotal3 / 100n;
+          expect(pending4).to.be.gte(expectedTotal3 - tolerance3);
+          expect(pending4).to.be.lte(expectedTotal3 + tolerance3);
+        });
+
+        it("Should distribute MONTHLY rewards proportionally among multiple stakers", async function () {
+          const poolId = await createPoolWithStrategy(1); // MONTHLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          const monthlyRewards = [
+            parseEther("100000"),
+            parseEther("100000"),
+            parseEther("100000"),
+          ];
+          await poolManager.setMonthlyRewards(poolId, monthlyRewards);
+          
+          // User1 stakes 8000 ECM
+          const stake1 = parseEther("8000");
+          const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
+          await usdtToken.connect(user1).approve(poolManager.target, usdt1);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // User2 stakes 2000 ECM (1/4 of user1)
+          const stake2 = parseEther("2000");
+          const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
+          await usdtToken.connect(user2).approve(poolManager.target, usdt2);
+          await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 1 month
+          await time.increase(30 * 24 * 3600);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          const pending2 = await poolManager.pendingRewards(poolId, user2.address);
+          
+          // User1 should get 80% of rewards, user2 should get 20%
+          const totalPending = pending1 + pending2;
+          const month1Rewards = monthlyRewards[0];
+          
+          // Total should be close to month1 rewards
+          const totalTolerance = month1Rewards / 100n;
+          expect(totalPending).to.be.gte(month1Rewards - totalTolerance);
+          expect(totalPending).to.be.lte(month1Rewards + totalTolerance);
+          
+          // Check proportions
+          const user1Share = (pending1 * 1000n) / totalPending;
+          const user2Share = (pending2 * 1000n) / totalPending;
+          
+          expect(user1Share).to.be.approximately(800n, 20n); // ~80% (800/1000)
+          expect(user2Share).to.be.approximately(200n, 20n); // ~20% (200/1000)
+        });
+
+        it("Should handle MONTHLY rewards when users join at different times", async function () {
+          const poolId = await createPoolWithStrategy(1); // MONTHLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          const monthlyRewards = [
+            parseEther("60000"),
+            parseEther("60000"),
+          ];
+          await poolManager.setMonthlyRewards(poolId, monthlyRewards);
+          
+          // User1 stakes at start
+          const stake1 = parseEther("5000");
+          const usdt1 = await poolManager.getRequiredUSDTForExactECM(poolId, stake1);
+          await usdtToken.connect(user1).approve(poolManager.target, usdt1);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stake1, usdt1, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // User1 alone for 15 days
+          await time.increase(15 * 24 * 3600);
+          
+          // User2 stakes same amount mid-month
+          const stake2 = parseEther("5000");
+          const usdt2 = await poolManager.getRequiredUSDTForExactECM(poolId, stake2);
+          await usdtToken.connect(user2).approve(poolManager.target, usdt2);
+          await poolManager.connect(user2).buyExactECMAndStake(poolId, stake2, usdt2, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // Complete first month (15 more days)
+          await time.increase(15 * 24 * 3600);
+          
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          const pending2 = await poolManager.pendingRewards(poolId, user2.address);
+          
+          // User1 should have more (had solo time + shared time)
+          expect(pending1).to.be.gt(pending2);
+          
+          // User1 got all rewards for first 15 days, then 50% for next 15 days
+          // User2 only got 50% for last 15 days
+          // So user1 should have approximately 3x user2's rewards for month 1
+          const ratio = (pending1 * 100n) / pending2;
+          expect(ratio).to.be.gt(250n); // At least 2.5x
+          expect(ratio).to.be.lt(350n); // Less than 3.5x
+        });
+
+        it("Should stop accruing MONTHLY rewards after schedule ends", async function () {
+          const poolId = await createPoolWithStrategy(1); // MONTHLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Only 3 months of rewards
+          const monthlyRewards = [
+            parseEther("30000"),
+            parseEther("30000"),
+            parseEther("30000"),
+          ];
+          await poolManager.setMonthlyRewards(poolId, monthlyRewards);
+          
+          // User stakes
+          const stakeAmount = parseEther("6000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After 90 days (3 months - end of schedule)
+          await time.increase(90 * 24 * 3600);
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          const totalMonthlyRewards = monthlyRewards[0] + monthlyRewards[1] + monthlyRewards[2];
+          const tolerance1 = totalMonthlyRewards / 100n;
+          expect(pending1).to.be.gte(totalMonthlyRewards - tolerance1);
+          expect(pending1).to.be.lte(totalMonthlyRewards + tolerance1);
+          
+          // After 120 days (4 months - beyond schedule)
+          await time.increase(30 * 24 * 3600);
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Should still be the same as month 3 end (no new rewards)
+          expect(pending2).to.be.approximately(pending1, pending1 / 100n);
+        });
+
+        it("Should correctly handle varying monthly reward amounts", async function () {
+          const poolId = await createPoolWithStrategy(1); // MONTHLY
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_SALE);
+          await poolManager.allocateForSale(poolId, ALLOCATED_FOR_SALE);
+          
+          await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+          await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+          
+          // Varying rewards: high, low, medium
+          const month1 = parseEther("80000"); // High
+          const month2 = parseEther("20000"); // Low
+          const month3 = parseEther("50000"); // Medium
+          const monthlyRewards = [month1, month2, month3];
+          
+          await poolManager.setMonthlyRewards(poolId, monthlyRewards);
+          
+          // User stakes
+          const stakeAmount = parseEther("4000");
+          const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
+          await usdtToken.connect(user1).approve(poolManager.target, requiredUsdt);
+          await poolManager.connect(user1).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, ONE_EIGHTY_DAYS, getEmptyVoucherInput(), "0x");
+          
+          // After month 1
+          await time.increase(30 * 24 * 3600);
+          const pending1 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // After month 2 (total 60 days)
+          await time.increase(30 * 24 * 3600);
+          const pending2 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // After month 3 (total 90 days)
+          await time.increase(30 * 24 * 3600);
+          const pending3 = await poolManager.pendingRewards(poolId, user1.address);
+          
+          // Verify cumulative rewards match schedule
+          const tolerance1 = month1 / 100n;
+          expect(pending1).to.be.gte(month1 - tolerance1);
+          expect(pending1).to.be.lte(month1 + tolerance1);
+          
+          const expectedTotal2 = month1 + month2;
+          const tolerance2 = expectedTotal2 / 100n;
+          expect(pending2).to.be.gte(expectedTotal2 - tolerance2);
+          expect(pending2).to.be.lte(expectedTotal2 + tolerance2);
+          
+          const expectedTotal3 = month1 + month2 + month3;
+          const tolerance3 = expectedTotal3 / 100n;
+          expect(pending3).to.be.gte(expectedTotal3 - tolerance3);
+          expect(pending3).to.be.lte(expectedTotal3 + tolerance3);
+          
+          // Verify increments match monthly amounts
+          const month2Increment = pending2 - pending1;
+          const month3Increment = pending3 - pending2;
+          
+          expect(month2Increment).to.be.approximately(month2, month2 / 50n);
+          expect(month3Increment).to.be.approximately(month3, month3 / 50n);
+        });
+      });
+    });
   });
 
   describe("Unstake & Claim", function () {
