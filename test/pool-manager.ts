@@ -1708,6 +1708,172 @@ describe("PoolManager & VestingManager", function () {
       expect(userInfo.pendingRewards).to.be.gt(0); // Should have accumulated rewards from first stake
     });
 
+    it.only("Should allow users to directly stake ECM tokens they already own", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      const stakeAmount = parseEther("1000"); // 1000 ECM
+
+      // Give user1 some ECM tokens directly
+      await ecmToken.mint(user1.address, stakeAmount);
+      
+      // Approve PoolManager to spend user's ECM
+      await ecmToken.connect(user1).approve(poolManager.target, stakeAmount);
+
+      const userInfoBefore = await poolManager.getUserInfo(poolId, user1.address);
+      expect(userInfoBefore.staked).to.equal(0);
+
+      // Stake ECM directly
+      await expect(
+        poolManager.connect(user1).stakeECM(poolId, stakeAmount, THIRTY_DAYS)
+      ).to.emit(poolManager, "ECMStaked")
+        .withArgs(poolId, user1.address, stakeAmount, THIRTY_DAYS);
+
+      const userInfoAfter = await poolManager.getUserInfo(poolId, user1.address);
+      expect(userInfoAfter.staked).to.equal(stakeAmount);
+      expect(userInfoAfter.stakeDuration).to.equal(THIRTY_DAYS);
+      expect(userInfoAfter.stakeStart).to.be.gt(0);
+
+      const poolInfo = await poolManager.getPoolInfo(poolId);
+      expect(poolInfo.totalStaked).to.equal(stakeAmount);
+      expect(poolInfo.totalUniqueStakers).to.equal(1);
+    });
+
+    it("Should enforce 500 ECM minimum for direct staking", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      const belowMin = parseEther("100"); // Less than 500 ECM
+      await ecmToken.mint(user1.address, belowMin);
+      await ecmToken.connect(user1).approve(poolManager.target, belowMin);
+
+      await expect(
+        poolManager.connect(user1).stakeECM(poolId, belowMin, THIRTY_DAYS)
+      ).to.be.revertedWithCustomError(poolManager, "MinPurchaseNotMet");
+    });
+
+    it("Should revert stakeECM if pool is inactive", async function () {
+      const poolId = await setupPoolForPurchase();
+      
+      // Deactivate pool
+      await poolManager.setPoolActive(poolId, false);
+
+      const stakeAmount = parseEther("1000");
+      await ecmToken.mint(user1.address, stakeAmount);
+      await ecmToken.connect(user1).approve(poolManager.target, stakeAmount);
+
+      await expect(
+        poolManager.connect(user1).stakeECM(poolId, stakeAmount, THIRTY_DAYS)
+      ).to.be.revertedWithCustomError(poolManager, "PoolNotActive");
+    });
+
+    it("Should revert stakeECM with invalid stake duration", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      const stakeAmount = parseEther("1000");
+      const invalidDuration = 999999; // Not in allowed durations
+
+      await ecmToken.mint(user1.address, stakeAmount);
+      await ecmToken.connect(user1).approve(poolManager.target, stakeAmount);
+
+      await expect(
+        poolManager.connect(user1).stakeECM(poolId, stakeAmount, invalidDuration)
+      ).to.be.revertedWithCustomError(poolManager, "InvalidStakeDuration");
+    });
+
+    it("Should allow users to stake additional ECM to existing position", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      // Allocate rewards for testing pending rewards accumulation
+      await ecmToken.approve(poolManager.target, ALLOCATED_FOR_REWARDS);
+      await poolManager.allocateForRewards(poolId, ALLOCATED_FOR_REWARDS);
+      await poolManager.setLinearRewardRate(poolId);
+
+      const firstStake = parseEther("1000");
+      const secondStake = parseEther("500");
+      const totalEcm = firstStake + secondStake;
+
+      // Give user ECM and approve
+      await ecmToken.mint(user1.address, totalEcm);
+      await ecmToken.connect(user1).approve(poolManager.target, totalEcm);
+
+      // First stake
+      await poolManager.connect(user1).stakeECM(poolId, firstStake, THIRTY_DAYS);
+
+      const userInfoAfterFirst = await poolManager.getUserInfo(poolId, user1.address);
+      expect(userInfoAfterFirst.staked).to.equal(firstStake);
+
+      // Move time forward
+      await time.increase(86400); // 1 day
+
+      // Second stake (should accumulate pending rewards)
+      await poolManager.connect(user1).stakeECM(poolId, secondStake, NINETY_DAYS);
+
+      const userInfoAfterSecond = await poolManager.getUserInfo(poolId, user1.address);
+      expect(userInfoAfterSecond.staked).to.equal(totalEcm);
+      expect(userInfoAfterSecond.stakeDuration).to.equal(NINETY_DAYS); // Updated to latest
+      
+      // Should have accumulated some pending rewards
+      expect(userInfoAfterSecond.pendingRewards).to.be.gt(0);
+    });
+
+    it("Should handle multiple users staking ECM directly", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      const user1Amount = parseEther("1000");
+      const user2Amount = parseEther("2000");
+
+      // Setup user1
+      await ecmToken.mint(user1.address, user1Amount);
+      await ecmToken.connect(user1).approve(poolManager.target, user1Amount);
+      await poolManager.connect(user1).stakeECM(poolId, user1Amount, THIRTY_DAYS);
+
+      // Setup user2
+      await ecmToken.mint(user2.address, user2Amount);
+      await ecmToken.connect(user2).approve(poolManager.target, user2Amount);
+      await poolManager.connect(user2).stakeECM(poolId, user2Amount, NINETY_DAYS);
+
+      const user1Info = await poolManager.getUserInfo(poolId, user1.address);
+      const user2Info = await poolManager.getUserInfo(poolId, user2.address);
+
+      expect(user1Info.staked).to.equal(user1Amount);
+      expect(user2Info.staked).to.equal(user2Amount);
+      expect(user1Info.stakeDuration).to.equal(THIRTY_DAYS);
+      expect(user2Info.stakeDuration).to.equal(NINETY_DAYS);
+
+      const poolInfo = await poolManager.getPoolInfo(poolId);
+      expect(poolInfo.totalStaked).to.equal(user1Amount + user2Amount);
+      expect(poolInfo.totalUniqueStakers).to.equal(2);
+    });
+
+    it("Should correctly track historical data for direct ECM staking", async function () {
+      const poolId = await setupPoolForPurchase();
+
+      const stakeAmount = parseEther("1500");
+      await ecmToken.mint(user1.address, stakeAmount);
+      await ecmToken.connect(user1).approve(poolManager.target, stakeAmount);
+
+      const poolBefore = await poolManager.getPoolInfo(poolId);
+      
+      await poolManager.connect(user1).stakeECM(poolId, stakeAmount, THIRTY_DAYS);
+
+      const poolAfter = await poolManager.getPoolInfo(poolId);
+      const userInfo = await poolManager.getUserInfo(poolId, user1.address);
+
+      // Check pool tracking
+      expect(poolAfter.totalStaked - poolBefore.totalStaked).to.equal(stakeAmount);
+      expect(poolAfter.lifetimeStakeVolume - poolBefore.lifetimeStakeVolume).to.equal(stakeAmount);
+      
+      // Check user tracking
+      expect(userInfo.totalStaked).to.equal(stakeAmount);
+      expect(userInfo.hasStaked).to.be.true;
+      expect(userInfo.firstStakeTimestamp).to.be.gt(0);
+      expect(userInfo.lastActionTimestamp).to.be.gt(0);
+      
+      // Peak staked should be updated
+      if (poolAfter.totalStaked > poolBefore.peakTotalStaked) {
+        expect(poolAfter.peakTotalStaked).to.equal(poolAfter.totalStaked);
+      }
+    });
+
     describe("Buy & Stake Edge Cases", function () {
       it("Should not revert when buying/staking with existing active stake", async function () {
         const poolId = await createDefaultPool();
@@ -1789,7 +1955,7 @@ describe("PoolManager & VestingManager", function () {
       });
     });
 
-    describe.only("Reward Strategy Behavior", function () {
+    describe("Reward Strategy Behavior", function () {
       describe("LINEAR Strategy", function () {
         it("Should accrue rewards continuously at constant rate per second", async function () {
           const poolId = await createDefaultPool(); // Creates LINEAR strategy by default

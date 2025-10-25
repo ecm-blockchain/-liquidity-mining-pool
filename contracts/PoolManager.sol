@@ -215,6 +215,12 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         address referrer,
         bytes32 codeHash
     );
+    event ECMStaked(
+        uint256 indexed poolId,
+        address indexed user,
+        uint256 ecmAmount,
+        uint256 stakeDuration
+    );
     event Unstaked(
         uint256 indexed poolId,
         address indexed user,
@@ -968,6 +974,70 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
+    /// @notice Stake ECM tokens directly (for users who already own ECM)
+    /// @param poolId The pool ID
+    /// @param ecmAmount Amount of ECM to stake (minimum 500 ECM)
+    /// @param selectedStakeDuration Selected staking duration
+    function stakeECM(
+        uint256 poolId,
+        uint256 ecmAmount,
+        uint256 selectedStakeDuration
+    ) external nonReentrant whenNotPaused {
+        if (poolId >= poolCount) revert PoolDoesNotExist();
+        if (ecmAmount == 0) revert InvalidAmount();
+        if (ecmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
+
+        Pool storage pool = pools[poolId];
+        if (!pool.active) revert PoolNotActive();
+        if (!_isAllowedDuration(poolId, selectedStakeDuration))
+            revert InvalidStakeDuration();
+
+        // Update pool rewards
+        _updatePoolRewards(poolId);
+
+        // Transfer ECM from user
+        pool.ecm.safeTransferFrom(msg.sender, address(this), ecmAmount);
+
+        // Update user info
+        UserInfo storage user = userInfo[poolId][msg.sender];
+
+        // Track unique stakers
+        if (!user.hasStaked) {
+            user.hasStaked = true;
+            user.firstStakeTimestamp = block.timestamp;
+            pool.totalUniqueStakers++;
+        }
+
+        // If user already has stake, accumulate pending rewards
+        if (user.staked > 0) {
+            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
+                PRECISION;
+            if (accumulated > user.rewardDebt) {
+                uint256 pending = accumulated - user.rewardDebt;
+                user.pendingRewards += pending;
+            }
+        }
+
+        // Stake the ECM
+        user.staked += ecmAmount;
+        user.stakeStart = block.timestamp;
+        user.stakeDuration = selectedStakeDuration;
+        pool.totalStaked += ecmAmount;
+        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
+
+        // Update historical tracking
+        user.totalStaked += ecmAmount;
+        user.lastActionTimestamp = block.timestamp;
+        pool.lifetimeStakeVolume += ecmAmount;
+
+        // Update peak staked if necessary
+        if (pool.totalStaked > pool.peakTotalStaked) {
+            pool.peakTotalStaked = pool.totalStaked;
+        }
+
+        emit ECMStaked(poolId, msg.sender, ecmAmount, selectedStakeDuration);
+    }
+
     // ============================================
     // USER FUNCTIONS - UNSTAKE & CLAIM
     // ============================================
@@ -1274,12 +1344,20 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // - totalPenaltiesCollected: penalties sent to penaltyReceiver
         // Use the net outstanding liquidity owed (liquidityOwedECM) rather than
         // the cumulative moved amount so that refills are correctly reflected.
-        uint256 shouldHave = (pool.allocatedForSale +
-            pool.allocatedForRewards) -
-            (pool.rewardsPaid +
-                liquidityOwedECM +
-                pool.lifetimeUnstakeVolume +
-                pool.totalPenaltiesCollected);
+        uint256 totalOutflows = pool.rewardsPaid +
+            liquidityOwedECM +
+            pool.lifetimeUnstakeVolume +
+            pool.totalPenaltiesCollected;
+        
+        uint256 totalInflows = pool.allocatedForSale + pool.allocatedForRewards;
+
+        uint256 shouldHave;
+        if (totalInflows >= totalOutflows) {
+            shouldHave = totalInflows - totalOutflows;
+        } else {
+            // More outflows than inflows indicates an accounting issue
+            shouldHave = 0;
+        }
 
         if (contractBalance >= shouldHave) {
             availableInContract = contractBalance - shouldHave;
