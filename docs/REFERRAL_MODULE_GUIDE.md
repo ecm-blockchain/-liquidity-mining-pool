@@ -4,20 +4,22 @@
 
 The **ReferralModule** is an independent smart contract that manages a two-tier referral commission system for the ECM PoolManager ecosystem:
 
-1. **Direct Commission**: Instant commission paid when a buyer stakes ECM using a referral code (based on staked amount)
+1. **Direct Commission**: Instant commission paid when a buyer stakes ECM using a referral voucher (based on staked amount)
 2. **Multi-Level Reward Commission**: Off-chain calculated commissions paid when buyers claim rewards (based on reward amount, distributed via Merkle proofs)
+
+**Key Integration**: Works with ReferralVoucher contract for EIP-712 signed vouchers instead of on-chain stored codes. Pool-level configuration allows different commission structures per pool.
 
 ## Architecture
 
 ### Contract Structure
 ```
 ReferralModule (Independent Contract)
-├── Referral Code Management
-│   ├── Register codes with commission rates
-│   ├── Track usage and limits
-│   └── Validate on purchase
+├── Pool-Level Commission Configuration
+│   ├── Set multi-level rates per pool [L1, L2, L3...]
+│   ├── Max 10 levels, total ≤50%
+│   └── Configurable by pool admin
 ├── Direct Commission System
-│   ├── Calculate commission on stake
+│   ├── Calculate commission on stake (from voucher)
 │   ├── Transfer immediately OR accrue
 │   └── Track buyer→referrer relationships
 └── Multi-Level Reward System
@@ -28,72 +30,80 @@ ReferralModule (Independent Contract)
 
 ### Integration with PoolManager
 ```
-User → PoolManager.buyAndStake(poolId, maxUsdt, duration, referralCode)
+User → PoolManager.buyAndStake(poolId, maxUsdt, duration, voucherInput)
+       ↓
+       PoolManager verifies ReferralVoucher signature (EIP-712)
        ↓
        PoolManager calculates ECM, receives USDT, auto-stakes
        ↓
-       PoolManager.recordReferral(codeHash, buyer, poolId, stakedAmount)
+       PoolManager.recordReferral(codeHash, buyer, referrer, poolId, stakedAmount, directBps, transferOnUse)
        ↓
        ReferralModule.recordPurchaseAndPayDirect()
-       ├── Validates code
-       ├── Links buyer→referrer
+       ├── Validates input params
+       ├── Links buyer→referrer (once)
        ├── Calculates directAmount = stakedAmount * directBps / 10000
        ├── Transfers OR accrues commission
-       └── Returns (referrer, directAmount)
+       └── Returns directAmount
 ```
 
 ## Key Features
 
-### 1. Referral Code System
-- **Hash-based storage**: Codes stored as `keccak256(codeString)`
-- **Commission configuration**: 
-  - `directBps`: Direct commission rate (max 20% = 2000 bps)
-  - `mlBps`: Array of multi-level rates [L1, L2, L3, ...] (max total 50%)
-- **Usage limits**: Optional `maxUses` and `expiry` timestamp
-- **Transfer modes**: 
-  - `transferOnUse = true`: Instant transfer from contract balance
-  - `transferOnUse = false`: Accrue for batch withdrawal
+### 1. Pool-Level Commission Configuration
+- **Pool-based setup**: Each pool can have different multi-level commission rates
+- **Max levels**: Up to 10 levels supported (configurable per pool)
+- **Rate limits**: Total multi-level commission ≤50% (5000 bps)
+- **Dynamic configuration**: Admin can update rates per pool
+- **No per-code storage**: Uses EIP-712 vouchers instead of on-chain code storage
 
-### 2. Anti-Fraud Security
+### 2. EIP-712 Voucher Integration  
+- **Stateless codes**: Referral codes stored in signed vouchers, not on-chain
+- **Signature verification**: PoolManager verifies voucher before calling ReferralModule
+- **Commission rates**: Direct commission rate comes from voucher
+- **Transfer mode**: Voucher specifies immediate transfer vs accrual
+- **Gas efficiency**: No on-chain code lookups required
+
+### 3. Anti-Fraud Security
 - **Self-referral prevention**: Buyer cannot be their own referrer
 - **Cyclic prevention**: Prevents 2-person referral loops
 - **Immutable relationships**: `referrerOf[buyer]` set once, permanent
-- **Usage tracking**: Enforces `maxUses` limits
-- **Expiry validation**: Checks code expiration timestamps
+- **Address validation**: Prevents zero address assignments
+- **Access control**: Only PoolManager (or owner) can record purchases
 
-### 3. Direct Commission Flow
+### 4. Direct Commission Flow
 ```solidity
 // Option A: Immediate Transfer (transferOnUse = true)
-1. User stakes 1000 ECM
+1. User stakes 1000 ECM with voucher (directBps = 1000)
 2. ReferralModule calculates: 1000 * 1000 bps / 10000 = 100 ECM
 3. ReferralModule transfers 100 ECM to referrer instantly
 4. Emits DirectCommissionPaid event
 
 // Option B: Accrual (transferOnUse = false)
-1. User stakes 1000 ECM
+1. User stakes 1000 ECM with voucher (directBps = 1000)
 2. ReferralModule calculates: 100 ECM commission
 3. directAccrued[referrer] += 100 ECM
-4. Emits DirectCommissionAccrued event
-5. Admin/referrer withdraws later via withdrawDirectAccrual()
+4. accruedToken[referrer] = ECM token address
+5. Emits DirectCommissionAccrued event
+6. Referrer withdraws later via withdrawDirectAccrual()
 ```
 
-### 4. Multi-Level Reward Commission Flow
+### 5. Multi-Level Reward Commission Flow
 ```
 Off-Chain Engine Process:
 1. Listen to RewardClaimRecorded events
 2. Query referrerOf[buyer] chain: L1, L2, L3, ...
-3. Calculate commissions:
+3. Get pool's mlBps configuration: getPoolLevelConfig(poolId)
+4. Calculate commissions:
    - L1: rewardAmount * mlBps[0] / 10000
    - L2: rewardAmount * mlBps[1] / 10000
    - L3: rewardAmount * mlBps[2] / 10000
-4. Aggregate all commissions into epoch (e.g., weekly batch)
-5. Build Merkle tree: leaves = keccak256(beneficiary, token, amount, epochId)
-6. Fund contract with totalAmount
-7. Submit root: submitReferralPayoutRoot(epochId, token, totalAmount, root, expiry)
+5. Aggregate all commissions into epoch (e.g., weekly batch)
+6. Build Merkle tree: leaves = keccak256(beneficiary, token, amount, epochId)
+7. Fund contract with totalAmount
+8. Submit root: submitReferralPayoutRoot(epochId, token, totalAmount, root, expiry)
 
 On-Chain Claim Process:
 1. User fetches proof from off-chain API
-2. User calls claimPayout(epochId, token, amount, proof)
+2. User calls claimReferral(epochId, token, amount, proof)
 3. ReferralModule verifies Merkle proof
 4. Transfers tokens to user
 5. Marks epoch claim as used
@@ -106,33 +116,20 @@ On-Chain Claim Process:
 #### `setPoolManager(address _poolManager)`
 - Sets the authorized PoolManager address
 - Only PoolManager can call integration functions
+- Emits `PoolManagerSet` event
 
-#### `registerReferralCode(...)`
+#### `setPoolLevelConfig(uint256 poolId, uint16[] calldata mlBps)`
 ```solidity
-function registerReferralCode(
-    bytes32 codeHash,        // keccak256(abi.encodePacked(codeString))
-    address owner,            // Referrer address
-    uint16 directBps,         // Direct commission (e.g., 1000 = 10%)
-    uint16[] calldata mlBps,  // Multi-level rates [500, 300, 200] = [5%, 3%, 2%]
-    uint32 maxUses,           // 0 = unlimited
-    uint64 expiry,            // 0 = never expires
-    bool transferOnUse        // true = instant, false = accrue
+function setPoolLevelConfig(
+    uint256 poolId,           // Pool ID to configure
+    uint16[] calldata mlBps   // Multi-level rates [L1, L2, L3...] in bps
 ) external onlyOwner
 ```
 
 **Constraints**:
-- `directBps` ≤ 2000 (20%)
-- `mlBps.length` ≤ 10 levels
+- `mlBps.length` ≤ 10 levels (MAX_LEVELS)
 - `sum(mlBps)` ≤ 5000 (50%)
-
-#### `updateReferralCode(...)`
-Updates commission rates for existing code (same signature as register)
-
-#### `revokeReferralCode(bytes32 codeHash)`
-Deactivates a code (sets `active = false`)
-
-#### `activateReferralCode(bytes32 codeHash)`
-Reactivates a revoked code
+- Emits `PoolLevelConfigSet` event
 
 #### `submitReferralPayoutRoot(...)`
 ```solidity
@@ -148,6 +145,7 @@ Submits a Merkle root for batch reward commission payouts.
 **Requirements**:
 - Contract must have `totalAmount` of `token` balance
 - EpochId must be unique
+- MerkleRoot cannot be zero
 
 #### `withdrawUnclaimed(uint256 epochId, address to)`
 Withdraws unclaimed funds after epoch expiry (admin only)
@@ -155,42 +153,52 @@ Withdraws unclaimed funds after epoch expiry (admin only)
 #### `fundContract(address token, uint256 amount)`
 Funds contract for direct commission transfers
 
+#### `emergencyRecoverTokens(address token, uint256 amount, address to)`
+Emergency token recovery for mistakenly sent tokens
+
 ### Integration Functions (Called by PoolManager)
 
 #### `recordPurchaseAndPayDirect(...)`
 ```solidity
 function recordPurchaseAndPayDirect(
-    bytes32 codeHash,
-    address buyer,
-    uint256 poolId,
-    uint256 stakedAmount,
-    address token
-) external onlyPoolManager returns (address referrer, uint256 directAmount)
+    bytes32 codeHash,        // Hash of referral code from voucher
+    address buyer,           // Buyer address
+    address referrer,        // Referrer address from voucher
+    uint256 poolId,          // Pool ID
+    uint256 stakedAmount,    // Amount of ECM staked
+    address token,           // ECM token address
+    uint16 directBps,        // Direct commission rate from voucher
+    bool transferOnUse       // Transfer mode from voucher
+) external onlyPoolManager returns (uint256 directAmount)
 ```
 **Process**:
-1. Validates referral code (active, not expired, under maxUses)
+1. Validates directBps ≤ 10000 (100%)
 2. Prevents self-referral and cycles
-3. Sets `referrerOf[buyer] = code.owner` (once)
+3. Sets `referrerOf[buyer] = referrer` (once)
 4. Calculates `directAmount = stakedAmount * directBps / 10000`
-5. Transfers OR accrues commission
-6. Returns referrer and amount for PoolManager logging
+5. Transfers OR accrues commission based on transferOnUse
+6. Returns directAmount for PoolManager logging
+
+#### `linkReferrer(address buyer, address referrer, bytes32 codeHash)`
+Alternative function to just establish referrer link without paying commission
+(useful if PoolManager handles direct commission payments itself)
 
 #### `recordRewardClaimEvent(...)`
 ```solidity
 function recordRewardClaimEvent(
     address claimant,
     uint256 poolId,
-    uint256 rewardAmount,
-    bytes32 claimTxHash
+    uint256 rewardAmount
 ) external onlyPoolManager
 ```
 Emits `RewardClaimRecorded` event for off-chain engine to process.
+Uses `block.timestamp` for ordering.
 
 ### User Functions
 
-#### `claimPayout(...)`
+#### `claimReferral(...)`
 ```solidity
-function claimPayout(
+function claimReferral(
     uint256 epochId,
     address token,
     uint256 amount,
@@ -202,22 +210,31 @@ Claims multi-level reward commission using Merkle proof.
 **Verification**:
 - Epoch exists and is funded
 - User hasn't claimed in this epoch
+- Token matches epoch token
 - Merkle proof valid for `keccak256(abi.encodePacked(user, token, amount, epochId))`
 
 #### `withdrawDirectAccrual(uint256 amount)`
 Withdraws accrued direct commissions (for `transferOnUse = false` mode).
-Pass `amount = 0` to withdraw all.
+Pass `amount = 0` to withdraw all. Uses stored `accruedToken[msg.sender]` address.
+
+#### `withdrawDirectAccrualFor(address referrer, uint256 amount, address to)`
+Admin function to withdraw accrued commissions on behalf of referrer.
 
 ### View Functions
 
 #### `getReferrer(address buyer) → address`
 Returns the referrer for a buyer (or address(0) if none)
 
-#### `getReferralCodeInfo(bytes32 codeHash) → (...)`
-Returns complete referral code configuration
+#### `getPoolLevelConfig(uint256 poolId) → uint16[] memory`
+Returns multi-level commission configuration for a pool
 
 #### `getPayoutRootInfo(uint256 epochId) → (...)`
-Returns Merkle root information and claim statistics
+Returns Merkle root information:
+- `root`: Merkle root hash
+- `token`: Token address
+- `totalAmount`: Total payout amount
+- `claimed`: Amount claimed so far
+- `funded`: Whether epoch is funded
 
 #### `hasClaimed(uint256 epochId, address user) → bool`
 Checks if user has claimed in a specific epoch
@@ -225,11 +242,17 @@ Checks if user has claimed in a specific epoch
 #### `getDirectAccrual(address referrer) → uint256`
 Returns accrued direct commission balance
 
-#### `calculateDirectCommission(bytes32 codeHash, uint256 stakedAmount) → uint256`
+#### `calculateDirectCommission(uint256 stakedAmount, uint16 directBps) → uint256`
 Calculates expected direct commission (off-chain preview)
 
 #### `getReferralChain(address buyer, uint8 maxLevels) → address[]`
 Returns referral chain [L1, L2, L3, ...] for a buyer
+
+#### Analytics Functions
+- `totalDirectPaid`: Total direct commissions paid
+- `totalMultiLevelPaid`: Total multi-level commissions paid
+- `directAccrued[referrer]`: Accrued balance per referrer
+- `accruedToken[referrer]`: Token address for accrued balance
 
 ## Commission Calculation Rules
 
@@ -239,20 +262,21 @@ directAmount = floor(stakedAmount * directBps / 10000)
 ```
 **Example**: 
 - Staked: 1000 ECM
-- directBps: 1000 (10%)
+- directBps: 1000 (10%) - from voucher
 - Commission: 1000 * 1000 / 10000 = 100 ECM
 
 ### Multi-Level Reward Commission (Reward Amount Based)
 ```solidity
-// Off-chain calculation per level
-level1Commission = floor(rewardAmount * mlBps[0] / 10000)
-level2Commission = floor(rewardAmount * mlBps[1] / 10000)
-level3Commission = floor(rewardAmount * mlBps[2] / 10000)
+// Off-chain calculation per level using pool configuration
+poolConfig = getPoolLevelConfig(poolId) // e.g., [500, 300, 200]
+level1Commission = floor(rewardAmount * poolConfig[0] / 10000)
+level2Commission = floor(rewardAmount * poolConfig[1] / 10000)
+level3Commission = floor(rewardAmount * poolConfig[2] / 10000)
 ```
 
 **Example**:
 - Reward claimed: 500 ECM
-- mlBps: [500, 300, 200] = [5%, 3%, 2%]
+- Pool mlBps: [500, 300, 200] = [5%, 3%, 2%]
 - L1 commission: 500 * 500 / 10000 = 25 ECM
 - L2 commission: 500 * 300 / 10000 = 15 ECM
 - L3 commission: 500 * 200 / 10000 = 10 ECM
@@ -261,15 +285,19 @@ level3Commission = floor(rewardAmount * mlBps[2] / 10000)
 
 ## Events
 
-### Referral Code Management
+### Pool Configuration
 ```solidity
-event ReferralCodeRegistered(bytes32 indexed codeHash, address indexed owner, uint16 directBps, uint16[] mlBps, bool transferOnUse);
-event ReferralCodeRevoked(bytes32 indexed codeHash);
+event PoolLevelConfigSet(uint256 indexed poolId, uint16[] mlBps);
+event PoolManagerSet(address indexed poolManager);
+```
+
+### Referrer Relationships
+```solidity
+event ReferrerLinked(address indexed buyer, address indexed referrer, bytes32 codeHash);
 ```
 
 ### Direct Commissions
 ```solidity
-event ReferrerLinked(address indexed buyer, address indexed referrer, bytes32 indexed codeHash);
 event DirectCommissionPaid(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, bytes32 codeHash);
 event DirectCommissionAccrued(address indexed referrer, address indexed buyer, uint256 indexed poolId, uint256 stakedAmount, uint256 amount, bytes32 codeHash);
 event DirectAccrualWithdrawn(address indexed referrer, uint256 amount, address indexed to);
@@ -277,7 +305,7 @@ event DirectAccrualWithdrawn(address indexed referrer, uint256 amount, address i
 
 ### Reward Commissions
 ```solidity
-event RewardClaimRecorded(address indexed claimant, uint256 indexed poolId, uint256 rewardAmount, bytes32 indexed claimTxHash);
+event RewardClaimRecorded(address indexed claimant, uint256 indexed poolId, uint256 rewardAmount, uint256 timestamp);
 event ReferralPayoutRootSubmitted(uint256 indexed epochId, bytes32 indexed root, address token, uint256 totalAmount, uint64 expiry);
 event ReferralPayoutClaimed(uint256 indexed epochId, address indexed claimer, address token, uint256 amount);
 event UnclaimedFundsWithdrawn(uint256 indexed epochId, address indexed to, uint256 amount);
@@ -288,23 +316,32 @@ event UnclaimedFundsWithdrawn(uint256 indexed epochId, address indexed to, uint2
 ### Responsibilities
 1. **Event Monitoring**: Subscribe to `RewardClaimRecorded` events from ReferralModule
 2. **Graph Maintenance**: Build and maintain buyer→referrer relationship graph
-3. **Commission Calculation**: 
+3. **Pool Configuration**: Track pool-level multi-level commission rates via `PoolLevelConfigSet` events
+4. **Commission Calculation**: 
    - For each claim, traverse referral chain
-   - Calculate per-level commissions using `mlBps` configuration
+   - Get pool's mlBps configuration: `getPoolLevelConfig(poolId)`
+   - Calculate per-level commissions using pool's configuration
    - Skip levels with no referrer (address(0))
-4. **Epoch Aggregation**: 
+5. **Epoch Aggregation**: 
    - Batch commissions into epochs (daily/weekly)
    - Sum per-beneficiary amounts
-5. **Merkle Tree Generation**:
+6. **Merkle Tree Generation**:
    - Leaf format: `keccak256(abi.encodePacked(beneficiary, token, amount, epochId))`
    - Sort leaves before building tree
-6. **Funding & Submission**:
+7. **Funding & Submission**:
    - Transfer `totalAmount` to ReferralModule
    - Call `submitReferralPayoutRoot()`
-7. **Proof API**: Serve Merkle proofs via REST API for users to claim
+8. **Proof API**: Serve Merkle proofs via REST API for users to claim
 
 ### Database Schema (Recommended)
 ```sql
+-- Pool configurations
+CREATE TABLE pool_configs (
+    pool_id UINT256 PRIMARY KEY,
+    ml_bps UINT16[],
+    updated_at TIMESTAMP
+);
+
 -- Referrer relationships
 CREATE TABLE referrer_links (
     buyer ADDRESS PRIMARY KEY,
@@ -317,8 +354,12 @@ CREATE TABLE referrer_links (
 CREATE TABLE purchases (
     tx_hash BYTES32 PRIMARY KEY,
     buyer ADDRESS,
+    referrer ADDRESS,
     pool_id UINT256,
     staked_amount UINT256,
+    direct_bps UINT16,
+    direct_amount UINT256,
+    transfer_on_use BOOLEAN,
     code_hash BYTES32,
     timestamp TIMESTAMP
 );
@@ -331,6 +372,7 @@ CREATE TABLE direct_commissions (
     pool_id UINT256,
     amount UINT256,
     paid BOOLEAN,
+    accrued BOOLEAN,
     paid_tx BYTES32,
     timestamp TIMESTAMP
 );
@@ -341,13 +383,14 @@ CREATE TABLE reward_claims (
     claimant ADDRESS,
     pool_id UINT256,
     reward_amount UINT256,
-    timestamp TIMESTAMP
+    timestamp UINT256 -- block.timestamp from event
 );
 
 -- Multi-level commissions (calculated)
 CREATE TABLE ml_commissions (
     id SERIAL PRIMARY KEY,
     epoch_id UINT256,
+    pool_id UINT256,
     source_claim_tx BYTES32,
     level UINT8,
     beneficiary ADDRESS,
@@ -363,8 +406,8 @@ CREATE TABLE payout_epochs (
     merkle_root BYTES32,
     submitted_tx BYTES32,
     funded BOOLEAN,
-    expiry TIMESTAMP,
-    created_at TIMESTAMP
+    expiry UINT64,
+    created_at UINT64
 );
 
 -- Claims tracking
@@ -389,13 +432,16 @@ GET  /api/v1/epochs
      → { epochs: [{ epochId, totalAmount, claimed, expiry, ... }] }
 
 GET  /api/v1/referrer/{address}/stats
-     → { totalDirectEarned, totalMLEarned, pendingClaims: [...] }
+     → { totalDirectEarned, totalMLEarned, pendingClaims: [...], accruedBalance }
 
 GET  /api/v1/buyer/{address}/chain
      → { chain: [L1, L2, L3, ...] }
 
+GET  /api/v1/pool/{poolId}/config
+     → { poolId, mlBps: [L1, L2, L3, ...] }
+
 POST /api/v1/calculate-commission
-     Body: { rewardAmount, buyerAddress }
+     Body: { rewardAmount, buyerAddress, poolId }
      → { levels: [{ level, beneficiary, amount }, ...] }
 ```
 
@@ -412,29 +458,43 @@ function setReferralModule(address _referralModule) external onlyOwner {
 }
 ```
 
-#### 2. Modify buyAndStake to Accept Referral Code
+#### 2. Modify buyAndStake to Accept Referral Voucher
 ```solidity
 function buyAndStake(
     uint256 poolId,
     uint256 maxUsdtAmount,
     uint256 selectedStakeDuration,
-    string calldata referralCode  // NEW PARAMETER
+    IReferralVoucher.VoucherInput calldata voucherInput  // NEW PARAMETER
 ) external nonReentrant whenNotPaused {
     // ... existing validation ...
 
-    // Hash referral code
-    bytes32 codeHash = keccak256(abi.encodePacked(referralCode));
+    // Verify referral voucher (if provided)
+    address referrer = address(0);
+    uint16 directBps = 0;
+    bool transferOnUse = false;
+    bytes32 codeHash = bytes32(0);
+    
+    if (voucherInput.voucher.vid != 0) {
+        // Verify EIP-712 signature
+        (referrer, directBps, transferOnUse, codeHash) = referralVoucher.verifyAndUse(
+            voucherInput.voucher,
+            voucherInput.signature
+        );
+    }
 
     // ... existing buy logic: calculate ECM, transfer USDT, update accounting ...
 
-    // BEFORE auto-staking, record referral
-    if (address(referralModule) != address(0)) {
-        (address referrer, uint256 directAmount) = referralModule.recordPurchaseAndPayDirect(
+    // BEFORE auto-staking, record referral (if voucher was used)
+    if (address(referralModule) != address(0) && referrer != address(0)) {
+        uint256 directAmount = referralModule.recordPurchaseAndPayDirect(
             codeHash,
             msg.sender,
+            referrer,
             poolId,
             ecmToAllocate,
-            address(pool.ecm)
+            address(pool.ecm),
+            directBps,
+            transferOnUse
         );
         // Optional: emit event with referrer info
     }
@@ -450,17 +510,10 @@ function unstake(uint256 poolId) external nonReentrant {
 
     // After claiming rewards, record event
     if (address(referralModule) != address(0) && pending > 0) {
-        bytes32 claimTxHash = keccak256(abi.encodePacked(
-            msg.sender, 
-            poolId, 
-            pending, 
-            block.timestamp
-        ));
         referralModule.recordRewardClaimEvent(
             msg.sender,
             poolId,
-            pending,
-            claimTxHash
+            pending
         );
     }
 }
@@ -470,17 +523,10 @@ function claimRewards(uint256 poolId) external nonReentrant {
 
     // After claiming, record event
     if (address(referralModule) != address(0) && pending > 0) {
-        bytes32 claimTxHash = keccak256(abi.encodePacked(
-            msg.sender, 
-            poolId, 
-            pending, 
-            block.timestamp
-        ));
         referralModule.recordRewardClaimEvent(
             msg.sender,
             poolId,
-            pending,
-            claimTxHash
+            pending
         );
     }
 }
@@ -580,35 +626,38 @@ for (referrer in referrers) {
 ### Scenario 1: Simple Direct Commission
 ```
 Setup:
-- UserA creates code "ALICE10" with directBps = 1000 (10%)
-- Admin registers: registerReferralCode(keccak256("ALICE10"), userA, 1000, [], 0, 0, true)
+- Pool 0 configured with mlBps = [500, 300, 200] (5%, 3%, 2%)
+- UserA creates referral voucher with directBps = 1000 (10%), transferOnUse = true
+- Backend signs voucher with EIP-712
 
 Flow:
-- UserB stakes 1000 ECM using "ALICE10"
-- PoolManager calls recordPurchaseAndPayDirect(hash, userB, 0, 1000e18, ECM)
+- UserB stakes 1000 ECM using voucher
+- PoolManager verifies voucher signature, extracts referrer = UserA, directBps = 1000
+- PoolManager calls recordPurchaseAndPayDirect(hash, userB, userA, 0, 1000e18, ECM, 1000, true)
 - ReferralModule:
   ✓ Links: referrerOf[userB] = userA
   ✓ Calculates: 1000 * 1000 / 10000 = 100 ECM
-  ✓ Transfers 100 ECM to userA
+  ✓ Transfers 100 ECM to userA (transferOnUse = true)
   ✓ Emits DirectCommissionPaid
 
 Result: UserA instantly receives 100 ECM
 ```
 
-### Scenario 2: Multi-Level Reward Commission
+### Scenario 2: Multi-Level Reward Commission with Pool Configuration
 ```
 Setup:
-- UserA owns code with mlBps = [500, 300, 200] (5%, 3%, 2%)
+- Pool 0 configured with mlBps = [500, 300, 200] (5%, 3%, 2%)
 - UserB referred by UserA (L1)
 - UserA referred by UserX (L2)
 - UserX referred by UserY (L3)
 - Chain: UserB → UserA → UserX → UserY
 
 Flow:
-1. UserB claims 1000 ECM rewards
-2. PoolManager emits RewardClaimRecorded(userB, 0, 1000e18, txHash)
+1. UserB claims 1000 ECM rewards from Pool 0
+2. PoolManager emits RewardClaimRecorded(userB, 0, 1000e18, timestamp)
 3. Off-chain engine:
-   - Queries chain: [userA, userX, userY]
+   - Queries pool config: getPoolLevelConfig(0) = [500, 300, 200]
+   - Queries chain: getReferralChain(userB, 10) = [userA, userX, userY]
    - Calculates:
      * userA: 1000 * 500 / 10000 = 50 ECM (L1)
      * userX: 1000 * 300 / 10000 = 30 ECM (L2)
@@ -616,29 +665,39 @@ Flow:
    - Aggregates into Epoch 2025-W43
 4. Admin funds 10,000 ECM (many claims aggregated)
 5. Admin calls submitReferralPayoutRoot(202543, ECM, 10000e18, root, expiry)
-6. UserA claims: claimPayout(202543, ECM, 50e18, proof)
-7. UserX claims: claimPayout(202543, ECM, 30e18, proof)
-8. UserY claims: claimPayout(202543, ECM, 20e18, proof)
+6. UserA claims: claimReferral(202543, ECM, 50e18, proof)
+7. UserX claims: claimReferral(202543, ECM, 30e18, proof)
+8. UserY claims: claimReferral(202543, ECM, 20e18, proof)
 
 Result: Each receives their multi-level commission from aggregated reward claims
 ```
 
-### Scenario 3: Accrual Mode with Batch Withdrawal
+### Scenario 3: Different Pools, Different Commission Structures
 ```
 Setup:
-- Code registered with transferOnUse = false
-- UserA owns code with directBps = 1000
+- Pool 0: mlBps = [500, 300, 200] (5%, 3%, 2% - 3 levels)
+- Pool 1: mlBps = [800, 400] (8%, 4% - 2 levels)
+- Pool 2: mlBps = [300, 200, 100, 50] (3%, 2%, 1%, 0.5% - 4 levels)
+- Same referral chain: UserB → UserA → UserX → UserY
 
 Flow:
-1. UserB stakes 500 ECM → directAccrued[userA] += 50 ECM
-2. UserC stakes 700 ECM → directAccrued[userA] += 70 ECM
-3. UserD stakes 1000 ECM → directAccrued[userA] += 100 ECM
-4. Total accrued: 220 ECM
-5. Admin periodically calls:
-   withdrawDirectAccrualFor(userA, 220e18, userA)
-6. Transfers 220 ECM to userA
+1. UserB claims 1000 ECM from Pool 0:
+   - L1 (UserA): 1000 * 500 / 10000 = 50 ECM
+   - L2 (UserX): 1000 * 300 / 10000 = 30 ECM
+   - L3 (UserY): 1000 * 200 / 10000 = 20 ECM
 
-Result: Batch payment reduces gas costs, admin controls payout timing
+2. UserB claims 1000 ECM from Pool 1:
+   - L1 (UserA): 1000 * 800 / 10000 = 80 ECM
+   - L2 (UserX): 1000 * 400 / 10000 = 40 ECM
+   - L3 (UserY): 0 ECM (Pool 1 only has 2 levels)
+
+3. UserB claims 1000 ECM from Pool 2:
+   - L1 (UserA): 1000 * 300 / 10000 = 30 ECM
+   - L2 (UserX): 1000 * 200 / 10000 = 20 ECM
+   - L3 (UserY): 1000 * 100 / 10000 = 10 ECM
+   - L4 (next referrer): 1000 * 50 / 10000 = 5 ECM
+
+Result: Commission amounts vary by pool configuration
 ```
 
 ## Deployment Guide
@@ -656,30 +715,33 @@ console.log("ReferralModule deployed:", referralModule.address);
 // Set PoolManager as authorized caller
 await referralModule.setPoolManager(poolManager.address);
 
+// Configure pool-level multi-level commission rates
+// Example: Pool 0 has 5%-3%-2% multi-level structure
+await referralModule.setPoolLevelConfig(0, [500, 300, 200]); // [5%, 3%, 2%]
+
 // Fund contract for direct commissions
 await ecmToken.approve(referralModule.address, ethers.utils.parseEther("100000"));
 await referralModule.fundContract(ecmToken.address, ethers.utils.parseEther("100000"));
 ```
 
-### Step 3: Register Referral Codes
+### Step 3: Configure Pool-Specific Commission Rates
 ```javascript
-// Example: 10% direct, 5%-3%-2% multi-level
-const codeHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("PROMO10"));
-await referralModule.registerReferralCode(
-    codeHash,
-    referrerAddress,
-    1000, // 10% direct
-    [500, 300, 200], // 5%, 3%, 2% multi-level
-    0, // unlimited uses
-    0, // no expiry
-    true // transfer immediately
-);
+// Different pools can have different commission structures
+await referralModule.setPoolLevelConfig(1, [800, 400]); // Pool 1: 8%-4% (2 levels)
+await referralModule.setPoolLevelConfig(2, [300, 200, 100, 50]); // Pool 2: 3%-2%-1%-0.5% (4 levels)
+
+// Each pool's configuration is independent
+const pool0Config = await referralModule.getPoolLevelConfig(0); // [500, 300, 200]
+const pool1Config = await referralModule.getPoolLevelConfig(1); // [800, 400]
 ```
 
 ### Step 4: Update PoolManager
 ```javascript
 // Set ReferralModule address in PoolManager
 await poolManager.setReferralModule(referralModule.address);
+
+// Set ReferralVoucher address in PoolManager (for EIP-712 verification)
+await poolManager.setReferralVoucher(referralVoucher.address);
 ```
 
 ### Step 5: Deploy Off-Chain Engine
@@ -725,17 +787,20 @@ const claimRate = (claimed * 100) / total;
 **Problem**: "InsufficientBalance" error on direct commission
 **Solution**: Fund ReferralModule with ECM tokens via `fundContract()`
 
-**Problem**: "CodeNotFound" error
-**Solution**: Verify code is registered with exact `keccak256(codeString)` hash
+**Problem**: "InvalidConfig" error when setting pool config
+**Solution**: Verify total mlBps ≤ 5000 (50%) and array length ≤ 10
 
 **Problem**: "InvalidProof" error on claim
 **Solution**: Ensure Merkle tree was built with sorted leaves, verify leaf format
 
 **Problem**: Off-chain engine not processing claims
-**Solution**: Check event listener connection, verify database has claim records
+**Solution**: Check event listener connection, verify database has claim records, ensure pool config is tracked
 
-**Problem**: Self-referral preventing purchases
-**Solution**: Implement code validation in frontend before transaction
+**Problem**: "ReferrerAlreadySet" error
+**Solution**: User can only be referred once; check existing referrer with `getReferrer()`
+
+**Problem**: EIP-712 voucher verification fails
+**Solution**: Ensure voucher signature is valid and backend uses correct domain separator
 
 ## Conclusion
 
