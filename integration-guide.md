@@ -246,6 +246,9 @@ await vestingManager.claimVested(vestingId);
 - Invalid Merkle proof
 - Already claimed commission
 - Early unstake penalty
+- **User already has referrer** (when calling setMyReferrer)
+- **Self-referral attempt** (user trying to refer themselves)
+- **Referral cycle detected** (circular referral relationships)
 
 ### Handling Example
 ```typescript
@@ -258,6 +261,19 @@ try {
     // Show early unstake penalty warning
   } else {
     // Generic error
+  }
+}
+
+// Specific handling for setMyReferrer
+try {
+  await poolManager.setMyReferrer(voucherInput, signature);
+} catch (err) {
+  if (err.message.includes('already has referrer')) {
+    // User already has a referrer, cannot change
+  } else if (err.message.includes('cannot refer yourself')) {
+    // Self-referral attempt
+  } else if (err.message.includes('cycle detected')) {
+    // Circular referral relationship
   }
 }
 ```
@@ -292,11 +308,25 @@ poolManager.on('RewardsVested', (user, poolId, amount, vestingId) => {
   console.log('Rewards vested:', amount.toString(), 'vestingId:', vestingId.toString());
 });
 
-// 7. Claim vested tokens
+// 7. Set referrer after purchase (if user didn't provide during step 3)
+if (userWantsToAddReferrer && !hasExistingReferrer) {
+  // Option A: Direct call to ReferralModule
+  await referralModule.setMyReferrer(voucherInput, voucherSignature);
+  
+  // Option B: Delegated via PoolManager (recommended)
+  await poolManager.setMyReferrer(voucherInput, voucherSignature);
+  
+  // Listen for ReferrerLinked event
+  referralModule.on('ReferrerLinked', (user, referrer, codeHash) => {
+    console.log('Referrer linked:', referrer, 'for user:', user);
+  });
+}
+
+// 8. Claim vested tokens
 const vestingIds = await vestingManager.getUserVestingIds(user.address);
 await vestingManager.claimVested(vestingIds[0]);
 
-// 8. Claim multi-level referral commission (with proof)
+// 9. Claim multi-level referral commission (with proof)
 await referralModule.claimReferral(epochId, token, amount, proof);
 ```
 

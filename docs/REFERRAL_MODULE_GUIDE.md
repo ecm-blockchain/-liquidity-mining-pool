@@ -86,7 +86,31 @@ User → PoolManager.buyAndStake(poolId, maxUsdt, duration, voucherInput)
 6. Referrer withdraws later via withdrawDirectAccrual()
 ```
 
-### 5. Multi-Level Reward Commission Flow
+### 5. Post-Purchase Referrer Setting (New Feature)
+- **Late referrer assignment**: Users can add referrer codes after their initial purchase/stake
+- **One-time only**: Once set, referrer relationship cannot be changed  
+- **No retroactive commissions**: Only affects future reward claims, not past staking activity
+- **Multiple access patterns**: Direct call to ReferralModule OR delegated via PoolManager
+- **Voucher validation**: Uses same EIP-712 voucher system as purchase-time referrals
+- **Anti-fraud protection**: Same security as purchase-time (no self-referral, no cycles)
+
+```solidity
+// Option A: Direct call to ReferralModule
+user.call(ReferralModule.setMyReferrer(voucherInput, signature))
+
+// Option B: Delegated call via PoolManager  
+user.call(PoolManager.setMyReferrer(voucherInput, signature))
+  ↓ (internally calls)
+ReferralModule.setMyReferrerFor(user, voucherInput, signature)
+```
+
+**Requirements for setMyReferrer**:
+- User must not have existing referrer: `referrerOf[user] == address(0)`
+- Valid voucher signature and not expired/revoked
+- Referrer cannot be user (no self-referral)
+- No referral cycles: `referrerOf[referrer] != user`
+
+### 6. Multi-Level Reward Commission Flow
 ```
 Off-Chain Engine Process:
 1. Listen to RewardClaimRecorded events
@@ -194,7 +218,42 @@ function recordRewardClaimEvent(
 Emits `RewardClaimRecorded` event for off-chain engine to process.
 Uses `block.timestamp` for ordering.
 
+#### `setMyReferrerFor(address user, VoucherInput voucher, bytes signature)` 
+```solidity
+function setMyReferrerFor(
+    address user,                    // User to set referrer for
+    VoucherInput calldata voucher,   // EIP-712 voucher structure  
+    bytes calldata signature         // Voucher signature
+) external onlyPoolManager
+```
+**Process**:
+1. Validates user has no existing referrer: `referrerOf[user] == address(0)`
+2. Verifies voucher signature via ReferralVoucher.verifyAndConsume()
+3. Extracts referrer from voucher.owner
+4. Validates anti-fraud rules (no self-referral, no cycles)
+5. Sets `referrerOf[user] = referrer`
+6. Emits `ReferrerLinked(user, referrer, voucher.codeHash)`
+
+**Note**: Called by PoolManager.setMyReferrer() for delegation pattern
+
 ### User Functions
+
+#### `setMyReferrer(VoucherInput voucher, bytes signature)`
+```solidity
+function setMyReferrer(
+    VoucherInput calldata voucher,   // EIP-712 voucher structure
+    bytes calldata signature         // Voucher signature  
+) external nonReentrant
+```
+**Direct user function** for setting referrer after initial purchase.
+Same validation logic as `setMyReferrerFor` but uses `msg.sender` as user.
+
+**Requirements**:
+- User must not have existing referrer
+- Valid voucher (not expired, not revoked, within usage limits)
+- Referrer must be voucher.owner
+- No self-referral: `msg.sender != voucher.owner`
+- No cycles: `referrerOf[voucher.owner] != msg.sender`
 
 #### `claimReferral(...)`
 ```solidity

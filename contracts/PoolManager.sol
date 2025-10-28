@@ -592,10 +592,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Sets the ReferralModule contract address
-    /// @param _referralModule Address of the ReferralModule contract
+    /// @param _referralModule Address of the ReferralModule contract (can be zero to disable)
     function setReferralModule(address _referralModule) external onlyOwner {
-        if (_referralModule == address(0)) revert InvalidAddress();
+        // Allow zero address to disable referral system
         referralModule = IReferralModule(_referralModule);
+        
+        // Note: ReferralVoucher.setReferralModule() must be called separately by the owner
+        // to authorize the ReferralModule, as PoolManager is not the owner of ReferralVoucher
+        
         emit ReferralModuleSet(_referralModule);
     }
 
@@ -1172,6 +1176,20 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                     paid
                 );
             }
+        }
+    }
+
+    /// @notice Allows user to set their referrer after initial purchase (one-time only)
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    /// @dev Can only be called if user has no referrer set
+    function setMyReferrer(
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external nonReentrant whenNotPaused {
+        // Delegate to ReferralModule with explicit user address
+        if (address(referralModule) != address(0)) {
+            referralModule.setMyReferrerFor(msg.sender, voucherInput, voucherSignature);
         }
     }
 

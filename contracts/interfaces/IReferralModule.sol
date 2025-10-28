@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import {IReferralVoucher} from "./IReferralVoucher.sol";
+
 /// @title IReferralModule - Interface for ReferralModule contract
 /// @notice Defines the integration points between PoolManager and ReferralModule
 interface IReferralModule {
@@ -50,6 +52,24 @@ interface IReferralModule {
     /// @param buyer Buyer address
     /// @return Referrer address
     function getReferrer(address buyer) external view returns (address);
+
+    /// @notice Allows user to set their referrer after initial purchase (one-time only)
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    function setMyReferrer(
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external;
+
+    /// @notice Allows PoolManager to set user's referrer after initial purchase (delegated call)
+    /// @param user User address who wants to set referrer
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    function setMyReferrerFor(
+        address user,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external;
 
     /// @notice Calculates expected direct commission for a staked amount
     /// @param stakedAmount Amount being staked

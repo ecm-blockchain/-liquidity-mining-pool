@@ -52,15 +52,17 @@
 ┌──────────────┐           ┌──────────────────────┐           ┌────────────────┐
 │    User      │──────────▶│   PoolManager        │──────────▶│ ReferralVoucher│
 │  (Buyer)     │buyAndStake│   (Core Logic)       │verify     │ (EIP-712)      │
-└──────────────┘           └──────────┬───────────┘           └────────────────┘
-                                      │
-                            ┌─────────┼─────────┐
-                            │         │         │
-                            ▼         ▼         ▼
+│              │setMyRef   │                      │voucher    │ Dual Auth      │
+└──────────────┘           └──────────┬───────────┘           └────┬───────────┘
+                                      │                            │
+                            ┌─────────┼─────────┐                  │
+                            │         │         │                  │
+                            ▼         ▼         ▼                  ▼
                    ┌─────────────┐  ┌──────────────┐  ┌───────────────┐
-                   │ Referral    │  │   Vesting    │  │  Liquidity    │
+                   │ Referral    │◀─│   Vesting    │  │  Liquidity    │
                    │  Module     │  │   Manager    │  │   Manager     │
                    │(Commissions)│  │  (Rewards)   │  │ (Uniswap LP)  │
+                   │setMyReferrer│  │              │  │               │
                    └─────────────┘  └──────────────┘  └───────────────┘
                             │                                  │
                             │ Off-chain                        │
@@ -1429,7 +1431,163 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+## Additional User Flows
+
+### 6. Late Referrer Setting Flow (New Feature)
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    SET MY REFERRER AFTER PURCHASE                         │
+│            (For users who want to add referral codes later)               │
+└──────────────────────────────────────────────────────────────────────────┘
+
+   ┌──────────┐
+   │   User   │  (Already purchased/staked ECM without referral)
+   └────┬─────┘
+        │
+        │ Current State: referrerOf[user] == address(0)
+        │ User obtains valid referral voucher
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  Option A: Direct Call to ReferralModule                 │
+   │  ReferralModule.setMyReferrer(voucherInput, signature)   │
+   └────┬─────────────────────────────────────────────────────┘
+        │
+        │ OR
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  Option B: Delegated Call via PoolManager                │
+   │  PoolManager.setMyReferrer(voucherInput, signature)      │
+   │  ↓ (internally calls)                                    │
+   │  ReferralModule.setMyReferrerFor(user, voucher, sig)     │
+   └────┬─────────────────────────────────────────────────────┘
+        │
+        │ 1. VALIDATE ACCESS
+        ├──► Check: ReferralVoucher supports dual authorization
+        ├──► Check: msg.sender can be PoolManager OR ReferralModule
+        │
+        │ 2. VALIDATE USER STATE
+        ├──► Require: referrerOf[user] == address(0) (no existing referrer)
+        │
+        │ 3. VERIFY VOUCHER
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  ReferralVoucher.verifyAndConsume()                      │
+   │  • Check expiry, revocation, usage limits               │
+   │  • Verify EIP-712 signature                             │
+   │  • Return voucher result with referrer info             │
+   └────┬─────────────────────────────────────────────────────┘
+        │
+        │ 4. ANTI-FRAUD VALIDATION
+        ├──► Require: user != referrer (no self-referral)
+        ├──► Require: referrerOf[referrer] != user (no cycles)
+        │
+        │ 5. SET RELATIONSHIP
+        ├──► referrerOf[user] = referrer
+        │
+        │ 6. EMIT EVENT
+        ├──► ReferrerLinked(user, referrer, codeHash)
+        │
+        ▼
+   ┌──────────┐
+   │ Complete │  User now has referrer for future reward claims
+   └──────────┘
+
+   IMPORTANT NOTES:
+   ┌────────────────────────────────────────────────────────┐
+   │ • One-time only: Cannot change referrer once set       │
+   │ • No retroactive commissions: Only affects future     │
+   │   reward claims, not past staking activity            │
+   │ • No direct commission: Since no new purchase made    │
+   │ • Multi-level eligible: Future reward claims will     │
+   │   trigger multi-level commission calculations         │
+   │ • Access control: Both PoolManager and ReferralModule │
+   │   can call ReferralVoucher.verifyAndConsume()         │
+   └────────────────────────────────────────────────────────┘
+```
+
+### 7. Graceful Degradation Flow
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      REFERRAL SYSTEM OPTIONAL                             │
+│              (System works with or without referrals)                     │
+└──────────────────────────────────────────────────────────────────────────┘
+
+   ┌──────────┐
+   │ Admin    │  (Can enable/disable referral system)
+   └────┬─────┘
+        │
+        │ Option 1: Disable referral system
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  PoolManager.setReferralModule(address(0))               │
+   │  PoolManager.setReferralVoucher(address(0))              │
+   └────┬─────────────────────────────────────────────────────┘
+        │
+        │ Result: referralModule == address(0)
+        │         referralVoucher == address(0)
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  User purchases/stakes without referral:                 │
+   │  • buyAndStake(poolId, usdt, duration, EMPTY_VOUCHER)    │
+   │  • System gracefully skips referral logic               │
+   │  • No commissions paid                                   │
+   │  • Core staking functionality unaffected                │
+   └────┬─────────────────────────────────────────────────────┘
+        │
+        │ Later: Admin can re-enable
+        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  PoolManager.setReferralModule(newModuleAddress)         │
+   │  PoolManager.setReferralVoucher(newVoucherAddress)       │
+   │  → System becomes referral-enabled again                 │
+   └──────────────────────────────────────────────────────────┘
+
+   EMPTY VOUCHER FORMAT:
+   ┌────────────────────────────────────────────────────────┐
+   │ VoucherInput {                                         │
+   │   vid: bytes32(0),                                     │
+   │   codeHash: bytes32(0),                                │
+   │   owner: address(0),                                   │
+   │   directBps: 0,                                        │
+   │   transferOnUse: false,                                │
+   │   expiry: 0,                                           │
+   │   maxUses: 0,                                          │
+   │   nonce: 0                                             │
+   │ }                                                      │
+   │ signature: "0x" (empty bytes)                          │
+   └────────────────────────────────────────────────────────┘
+```
+
 ## Security Architecture
+
+### Access Control Matrix
+
+| Contract | Function | Caller Restrictions | Purpose |
+|----------|----------|-------------------|---------|
+| **PoolManager** | All pool operations | Users + Owner | Core functionality |
+| | `setReferralModule` | Owner only | System config (supports zero address) |
+| | `setReferralVoucher` | Owner only | System config |
+| | `setMyReferrer` | Users only | Delegated referrer setting |
+| **ReferralModule** | `link` | PoolManager only | Purchase-time linking |
+| | `setMyReferrer` | Users only | Post-purchase referrer setting |
+| | `setMyReferrerFor` | PoolManager only | Delegated referrer setting |
+| | `trackReward` | PoolManager only | Reward tracking |
+| | Admin functions | Owner only | Configuration |
+| **ReferralVoucher** | `verifyAndConsume` | **DUAL AUTH**: PoolManager OR ReferralModule | Enhanced voucher validation |
+| | `setReferralModule` | Owner only | Enable dual authorization |
+| | Admin functions | Owner only | Configuration |
+| **VestingManager** | `createVesting` | PoolManager only | Vesting creation |
+| | `claimVested` | Beneficiaries | User claims |
+| **LiquidityManager** | All functions | Owner only | Admin liquidity ops |
+
+#### Enhanced Security Features (New)
+- **Dual Authorization**: ReferralVoucher supports calls from both PoolManager and ReferralModule for flexibility
+- **One-time Referrer Setting**: Users can set referrer only once, preventing relationship changes
+- **Anti-fraud Protection**: Self-referral and referral cycles are blocked
+- **Graceful Degradation**: System works seamlessly with referralModule set to address(0)
+- **No Retroactive Commissions**: Late referrer setting only affects future activities
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1449,6 +1607,7 @@
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ • onlyOwner: Admin functions (register codes, roots)     │  │
 │  │ • onlyPoolManager: Integration hooks (record purchase)   │  │
+│  │ • onlyAuthorizedCaller: Enhanced dual authorization      │  │
 │  │ • Public: User claims (permissionless with proof)        │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                  │
@@ -1459,6 +1618,7 @@
 │  │ • Immutable relationships: referrerOf set once           │  │
 │  │ • Code usage limits: maxUses enforcement                 │  │
 │  │ • Code expiry: timestamp validation                      │  │
+│  │ • Late-setting protection: One-time referrer assignment  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  Layer 4: Financial Security                                    │

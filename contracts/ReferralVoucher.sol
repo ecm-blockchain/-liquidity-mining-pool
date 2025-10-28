@@ -56,6 +56,9 @@ contract ReferralVoucher is Ownable {
     /// @notice Authorized PoolManager contract
     address public poolManager;
 
+    /// @notice Authorized ReferralModule contract
+    address public referralModule;
+
     // ============================================
     // EVENTS
     // ============================================
@@ -71,6 +74,7 @@ contract ReferralVoucher is Ownable {
     );
     event VoucherRevokedEvent(bytes32 indexed vid);
     event PoolManagerSet(address indexed poolManager);
+    event ReferralModuleSet(address indexed referralModule);
 
     // ============================================
     // ERRORS
@@ -88,8 +92,13 @@ contract ReferralVoucher is Ownable {
     // MODIFIERS
     // ============================================
 
-    modifier onlyPoolManager() {
-        if (msg.sender != poolManager) revert UnauthorizedCaller();
+    modifier onlyAuthorizedCaller() {
+        // Debug information
+        if (msg.sender != poolManager && msg.sender != referralModule) {
+            // Add some debugging before reverting
+            // Note: In production, remove these debug statements
+            revert UnauthorizedCaller();
+        }
         _;
     }
 
@@ -137,6 +146,13 @@ contract ReferralVoucher is Ownable {
         emit IssuerRemoved(issuer);
     }
 
+    /// @notice Sets the ReferralModule contract address
+    function setReferralModule(address _referralModule) external onlyOwner {
+        if (_referralModule == address(0)) revert InvalidAddress();
+        referralModule = _referralModule;
+        emit ReferralModuleSet(_referralModule);
+    }
+
     /// @notice Revokes a voucher ID
     function revokeVoucher(bytes32 vid) external onlyOwner {
         voucherRevoked[vid] = true;
@@ -147,7 +163,7 @@ contract ReferralVoucher is Ownable {
     // CORE FUNCTIONS
     // ============================================
 
-    /// @notice Verifies and consumes a voucher (called by PoolManager)
+    /// @notice Verifies and consumes a voucher (called by PoolManager or ReferralModule)
     /// @param voucher Voucher input data
     /// @param signature EIP-712 signature from authorized issuer
     /// @param redeemer Address redeeming the voucher (buyer)
@@ -156,7 +172,7 @@ contract ReferralVoucher is Ownable {
         VoucherInput calldata voucher,
         bytes calldata signature,
         address redeemer
-    ) external onlyPoolManager returns (VoucherResult memory result) {
+    ) external onlyAuthorizedCaller returns (VoucherResult memory result) {
         // Check revocation
         if (voucherRevoked[voucher.vid]) revert VoucherIsRevoked();
 

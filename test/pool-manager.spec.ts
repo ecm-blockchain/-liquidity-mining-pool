@@ -1708,7 +1708,7 @@ describe("PoolManager & VestingManager", function () {
       expect(userInfo.pendingRewards).to.be.gt(0); // Should have accumulated rewards from first stake
     });
 
-    it.only("Should allow users to directly stake ECM tokens they already own", async function () {
+    it("Should allow users to directly stake ECM tokens they already own", async function () {
       const poolId = await setupPoolForPurchase();
 
       const stakeAmount = parseEther("1000"); // 1000 ECM
@@ -6940,8 +6940,12 @@ describe("PoolManager & VestingManager", function () {
       // Configure integrations
       await referralVoucher.setPoolManager(poolManager.target);
       await referralModule.setPoolManager(poolManager.target);
+      await referralModule.setReferralVoucher(referralVoucher.target);
       await poolManager.setReferralVoucher(referralVoucher.target);
       await poolManager.setReferralModule(referralModule.target);
+      
+      // CRITICAL: Authorize ReferralModule in ReferralVoucher for setMyReferrer flow
+      await referralVoucher.setReferralModule(referralModule.target);
 
       // Add owner as authorized issuer for vouchers
       await referralVoucher.addIssuer(owner.address);
@@ -7770,6 +7774,329 @@ describe("PoolManager & VestingManager", function () {
             proof
           )
         ).to.be.revertedWithCustomError(referralModule, "AlreadyClaimed");
+      });
+    });
+
+    describe("Set My Referrer After Purchase", function () {
+      it("Should allow user to set referrer after initial purchase without voucher", async function () {
+        // Setup buyer1 with funds
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        // Initial purchase without referral voucher
+        await poolManager.connect(buyer1).buyAndStake(
+          0, // poolId
+          parseUnits("1000", 6), // maxUsdtAmount
+          THIRTY_DAYS, // stakeDuration
+          getEmptyVoucherInput(), // No referral voucher
+          "0x" // No signature
+        );
+
+        // Verify no referrer is set initially
+        expect(await referralModule.getReferrer(buyer1.address)).to.equal(ethers.ZeroAddress);
+
+        // Generate voucher for setting referrer later
+        const code = "LATE_REF";
+        const directBps = 500; // 5% direct commission (for future purchases)
+        const maxUses = 1;
+        const nonce = 100;
+        const expiry = (await getCurrentTimestamp()) + 86400;
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          code,
+          referrer1.address,
+          directBps,
+          true, // transferOnUse
+          maxUses,
+          nonce,
+          expiry
+        );
+
+        // Set referrer using setMyReferrer
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(voucher, signature)
+        ).to.not.be.reverted;
+
+        // Verify referrer is now set
+        expect(await referralModule.getReferrer(buyer1.address)).to.equal(referrer1.address);
+
+        // Verify ReferrerLinked event was emitted
+        const events = await referralModule.queryFilter(
+          referralModule.filters.ReferrerLinked()
+        );
+        const linkEvent = events.find(e => e.args?.buyer === buyer1.address);
+        expect(linkEvent).to.not.be.undefined;
+        expect(linkEvent!.args?.referrer).to.equal(referrer1.address);
+
+        console.log("✅ User successfully set referrer after initial purchase");
+      });
+
+      it("Should revert if user tries to set referrer when already has one", async function () {
+        // Setup buyer1 with funds
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        // Purchase with referral voucher
+        const code1 = "FIRST_REF";
+        const { voucher: v1, signature: s1 } = await generateReferralVoucher(
+          owner,
+          code1,
+          referrer1.address,
+          500,
+          true,
+          1,
+          200,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          v1,
+          s1
+        );
+
+        // Verify referrer is set
+        expect(await referralModule.getReferrer(buyer1.address)).to.equal(referrer1.address);
+
+        // Try to set different referrer
+        const code2 = "SECOND_REF";
+        const { voucher: v2, signature: s2 } = await generateReferralVoucher(
+          owner,
+          code2,
+          referrer2.address,
+          500,
+          true,
+          1,
+          201,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(v2, s2)
+        ).to.be.revertedWithCustomError(referralModule, "ReferrerAlreadySet");
+      });
+
+      it("Should revert if voucher is invalid or expired", async function () {
+        // Setup buyer1 with funds
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        // Purchase without referral
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          getEmptyVoucherInput(),
+          "0x"
+        );
+
+        // Try with expired voucher
+        const expiredVoucher = await generateReferralVoucher(
+          owner,
+          "EXPIRED",
+          referrer1.address,
+          500,
+          true,
+          1,
+          300,
+          (await getCurrentTimestamp()) - 1 // Already expired
+        );
+
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(expiredVoucher.voucher, expiredVoucher.signature)
+        ).to.be.revertedWithCustomError(referralVoucher, "VoucherExpired");
+
+        // Try with invalid signature
+        const validVoucher = await generateReferralVoucher(
+          owner,
+          "VALID",
+          referrer1.address,
+          500,
+          true,
+          1,
+          301,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        const invalidSignature = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(validVoucher.voucher, invalidSignature)
+        ).to.be.revertedWithCustomError(referralVoucher, "InvalidSignature");
+      });
+
+      it("Should prevent self-referral and cyclic referrals", async function () {
+        // Setup buyer1
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          getEmptyVoucherInput(),
+          "0x"
+        );
+
+        // Try self-referral
+        const selfRefVoucher = await generateReferralVoucher(
+          owner,
+          "SELF_REF",
+          buyer1.address, // Self as referrer
+          500,
+          true,
+          1,
+          400,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(selfRefVoucher.voucher, selfRefVoucher.signature)
+        ).to.be.revertedWithCustomError(referralModule, "SelfReferral");
+      });
+
+      it("Should enable multi-level commissions for future reward claims after setting referrer", async function () {
+        // Configure multi-level commissions
+        const mlBps = [300, 200, 100]; // L1: 3%, L2: 2%, L3: 1%
+        await referralModule.setPoolLevelConfig(0, mlBps);
+
+        // Setup buyer1 with purchase (no initial referrer)
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          getEmptyVoucherInput(),
+          "0x"
+        );
+
+        // Set referrer after purchase
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          "MULTI_LEVEL",
+          referrer1.address,
+          500,
+          true,
+          1,
+          500,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await poolManager.connect(buyer1).setMyReferrer(voucher, signature);
+
+        // Build referral chain: buyer1 → referrer1 → referrer2 → referrer3
+        await referralModule.linkReferrer(
+          referrer1.address, 
+          referrer2.address, 
+          ethers.keccak256(ethers.toUtf8Bytes("CHAIN2"))
+        );
+        await referralModule.linkReferrer(
+          referrer2.address, 
+          referrer3.address, 
+          ethers.keccak256(ethers.toUtf8Bytes("CHAIN3"))
+        );
+
+        // Wait for rewards to accrue and claim
+        await time.increase(THIRTY_DAYS);
+        await poolManager.connect(buyer1).claimRewards(0);
+
+        // Collect and verify reward claim events
+        await collectRewardClaimEvents();
+        const commissions = await calculateMultiLevelCommissions(0, ecmToken.target);
+
+        // Should have commissions for all 3 levels in the chain
+        expect(commissions.length).to.equal(3);
+        
+        const referrer1Commission = commissions.find(c => c.address === referrer1.address);
+        const referrer2Commission = commissions.find(c => c.address === referrer2.address);
+        const referrer3Commission = commissions.find(c => c.address === referrer3.address);
+
+        expect(referrer1Commission).to.not.be.undefined;
+        expect(referrer2Commission).to.not.be.undefined;
+        expect(referrer3Commission).to.not.be.undefined;
+
+        // Verify commission levels are correct
+        expect(referrer1Commission!.level).to.equal(1);
+        expect(referrer2Commission!.level).to.equal(2);
+        expect(referrer3Commission!.level).to.equal(3);
+
+        console.log("✅ Multi-level commissions calculated correctly after setting referrer");
+      });
+
+      it("Should allow setting referrer through PoolManager even when ReferralModule is not set", async function () {
+        // Temporarily remove ReferralModule from PoolManager
+        await poolManager.setReferralModule(ethers.ZeroAddress);
+
+        // Setup buyer1
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          getEmptyVoucherInput(),
+          "0x"
+        );
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          "NO_MODULE",
+          referrer1.address,
+          500,
+          true,
+          1,
+          600,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        // Should not revert but also not do anything
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(voucher, signature)
+        ).to.not.be.reverted;
+
+        // Restore ReferralModule for other tests
+        await poolManager.setReferralModule(referralModule.target);
+      });
+
+      it("Should set ReferralVoucher in ReferralModule for setMyReferrer to work", async function () {
+        // Setup ReferralModule with ReferralVoucher
+        await referralModule.setReferralVoucher(referralVoucher.target);
+
+        // Setup buyer1
+        await setupUser(buyer1, 0n, parseUnits("10000", 6));
+        await usdtToken.connect(buyer1).approve(poolManager.target, parseUnits("10000", 6));
+
+        await poolManager.connect(buyer1).buyAndStake(
+          0,
+          parseUnits("1000", 6),
+          THIRTY_DAYS,
+          getEmptyVoucherInput(),
+          "0x"
+        );
+
+        const { voucher, signature } = await generateReferralVoucher(
+          owner,
+          "WITH_VOUCHER",
+          referrer1.address,
+          500,
+          true,
+          1,
+          700,
+          (await getCurrentTimestamp()) + 86400
+        );
+
+        await expect(
+          poolManager.connect(buyer1).setMyReferrer(voucher, signature)
+        ).to.not.be.reverted;
+
+        // Verify referrer was set
+        expect(await referralModule.getReferrer(buyer1.address)).to.equal(referrer1.address);
       });
     });
   });

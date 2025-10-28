@@ -6,7 +6,8 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-
+import "./interfaces/IReferralVoucher.sol";
+import "hardhat/console.sol";
 /// @title ReferralModule - Multi-Level Referral System with Direct & Reward-Based Commissions
 /// @notice Handles referral tracking, direct commission payments, and off-chain calculated multi-level reward commissions via Merkle proofs
 /// @dev Two-tier commission system:
@@ -61,6 +62,9 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // Authorized PoolManager
     address public poolManager;
 
+    // ReferralVoucher contract for voucher verification
+    IReferralVoucher public referralVoucher;
+
     // Analytics
     uint256 public totalDirectPaid;
     uint256 public totalMultiLevelPaid;
@@ -79,6 +83,7 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     event ReferralPayoutClaimed(uint256 indexed epochId, address indexed claimer, address token, uint256 amount);
     event UnclaimedFundsWithdrawn(uint256 indexed epochId, address indexed to, uint256 amount);
     event PoolManagerSet(address indexed poolManager);
+    event ReferralVoucherSet(address indexed referralVoucher);
 
     // ============================================
     // ERRORS
@@ -125,6 +130,13 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         if (_poolManager == address(0)) revert InvalidAddress();
         poolManager = _poolManager;
         emit PoolManagerSet(_poolManager);
+    }
+
+    /// @notice Sets the ReferralVoucher contract address
+    function setReferralVoucher(address _referralVoucher) external onlyOwner {
+        if (_referralVoucher == address(0)) revert InvalidAddress();
+        referralVoucher = IReferralVoucher(_referralVoucher);
+        emit ReferralVoucherSet(_referralVoucher);
     }
 
     /// @notice Sets the multi-level commission configuration for a pool
@@ -219,6 +231,64 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         } else {
             if (referrerOf[buyer] != referrer) revert ReferrerAlreadySet();
         }
+    }
+
+    /// @notice Allows user to set their referrer after initial purchase (one-time only) - Direct call
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    /// @dev Can only be called if user has no referrer set (referrerOf[msg.sender] == address(0))
+    function setMyReferrer(
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external nonReentrant {
+        _setMyReferrerInternal(msg.sender, voucherInput, voucherSignature);
+    }
+
+    /// @notice Allows PoolManager to set user's referrer after initial purchase (one-time only) - Delegated call
+    /// @param user User address who wants to set referrer
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    /// @dev Can only be called by PoolManager, user must not have referrer set
+    function setMyReferrerFor(
+        address user,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external onlyPoolManager nonReentrant {
+        _setMyReferrerInternal(user, voucherInput, voucherSignature);
+    }
+
+    /// @notice Internal function to set referrer for a user
+    /// @param user User address
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    function _setMyReferrerInternal(
+        address user,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) internal {
+        // Check if user already has a referrer
+        if (referrerOf[user] != address(0)) revert ReferrerAlreadySet();
+        
+        // Verify referral voucher
+        if (address(referralVoucher) == address(0)) revert InvalidAddress();
+        if (voucherInput.vid == bytes32(0)) revert InvalidAmount();
+        
+        IReferralVoucher.VoucherResult memory voucherResult = referralVoucher.verifyAndConsume(
+            voucherInput,
+            voucherSignature,
+            user
+        );
+        
+        address referrer = voucherResult.owner;
+        bytes32 codeHash = voucherResult.codeHash;
+        
+        // Validate referrer
+        if (user == referrer) revert SelfReferral();
+        if (referrerOf[referrer] == user) revert CyclicReferral();
+        
+        // Set referrer relationship
+        referrerOf[user] = referrer;
+        emit ReferrerLinked(user, referrer, codeHash);
     }
 
     /// @notice Records a reward claim event (for off-chain engine)

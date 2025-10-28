@@ -43,6 +43,9 @@ This system enables users to purchase ECM tokens with USDT using referral codes,
   - Direct commission processing (immediate or accrued) via ReferralModule
   - Multi-level commission event recording for off-chain Merkle distribution
   - Immutable referrer-buyer relationships with anti-gaming rules
+  - **Post-purchase referrer setting**: Users can add referral codes after initial purchase via `setMyReferrer()`
+  - **Dual access patterns**: Direct call to ReferralModule OR delegated via PoolManager
+  - **One-time assignment**: Referrer relationships cannot be changed once set
 
 - **Early Unstaking with Penalties**
   - Configurable principal slashing (default 25% = 2500 bps)
@@ -224,6 +227,34 @@ await poolManager.connect(user).unstake(poolId);
 // If pool has vesting enabled, claim from VestingManager
 const vestingIds = await vestingManager.getUserVestingIds(user.address);
 await vestingManager.connect(user).claimVested(vestingIds[0]);
+```
+
+### 6) Set Referrer After Purchase (New Feature)
+
+```ts
+// If user didn't provide referral code during purchase, they can add it later
+// Requires valid EIP-712 voucher signature
+
+// Option A: Direct call to ReferralModule
+await referralModule.connect(user).setMyReferrer(
+  {
+    vid: voucherId,
+    codeHash: ethers.keccak256(ethers.toUtf8Bytes("FRIEND2024")),
+    owner: referrerAddress,
+    directBps: 1000, // 10% (not used for late setting)
+    transferOnUse: false,
+    expiry: Math.floor(Date.now() / 1000) + 86400, // 24 hours
+    maxUses: 100,
+    nonce: 1
+  },
+  voucherSignature
+);
+
+// Option B: Delegated call via PoolManager (recommended for UX)
+await poolManager.connect(user).setMyReferrer(voucherInput, voucherSignature);
+
+// Note: No direct commission paid for late referrer setting
+// Only affects future reward claims for multi-level commissions
 ```
 
 ---
