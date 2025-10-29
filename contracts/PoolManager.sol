@@ -35,7 +35,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // CONSTANTS
     // ============================================
 
-    uint256 public constant PRECISION = 1e18;
+    uint256 public constant PRECISION = 1e27;
     uint256 public constant MIN_PURCHASE_ECM = 500 ether; // 500 ECM minimum
     uint256 public constant DEFAULT_PENALTY_BPS = 2500; // 25% slash
     uint256 public constant MAX_BPS = 10000;
@@ -80,9 +80,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         /// @notice Total ECM currently staked by all users (equal to 'sold')
         uint256 totalStaked;
         // Reward Distribution (accRewardPerShare Pattern)
-        uint256 accRewardPerShare; // Accumulated rewards per share, scaled by 1e18
+        uint256 accRewardPerShare; // Accumulated rewards per share, scaled by PRECISION (1e27)
         // Formula: sum(rewardRate * timeDelta / totalStaked)
-        // Used to calculate: userReward = (userStake * accRewardPerShare / 1e18) - userRewardDebt
+        // Used to calculate: userReward = (userStake * accRewardPerShare / PRECISION) - userRewardDebt
         uint256 lastRewardTime; // Last timestamp when accRewardPerShare was updated
         // Reward Strategy Configuration
         RewardStrategy rewardStrategy; // LINEAR or MONTHLY reward distribution
@@ -129,9 +129,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 stakeDuration; // Selected lock duration (from allowedStakeDurations)
         // Reward Calculation (accRewardPerShare Pattern)
         uint256 rewardDebt; // Reward debt for accRewardPerShare calculation
-        // Formula: rewardDebt = staked * accRewardPerShare / 1e18
+        // Formula: rewardDebt = staked * accRewardPerShare / PRECISION
         // Purpose: Tracks rewards already accounted for
-        // Pending rewards = (staked * accRewardPerShare / 1e18) - rewardDebt
+        // Pending rewards = (staked * accRewardPerShare / PRECISION) - rewardDebt
         uint256 pendingRewards; // Accumulated unclaimed rewards from previous stakes
         // Historical & Analytics Data
         bool hasStaked; // True if user has ever staked in this pool (for unique staker count)
@@ -441,7 +441,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             pool.totalRewardsAccrued;
         if (remainingRewards == 0) revert InsufficientRewardsForRate();
 
-        uint256 rewardRatePerSecond = remainingRewards / pool.maxDuration;
+        uint256 rewardRatePerSecond = (remainingRewards * 1e18) / (pool.maxDuration * 1e18);
         if (rewardRatePerSecond == 0) revert InvalidRewardRate();
         pool.rewardRatePerSecond = rewardRatePerSecond;
 
@@ -1274,7 +1274,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (block.timestamp > pool.lastRewardTime && pool.totalStaked > 0) {
             uint256 delta = block.timestamp - pool.lastRewardTime;
             uint256 rewardAccrued = _calculateRewardAccruedView(pool, delta);
-            accRewardPerShare += (rewardAccrued * PRECISION) / pool.totalStaked;
+            accRewardPerShare += (rewardAccrued * PRECISION * 1e18) / (pool.totalStaked * 1e18);
         }
 
         pending =
@@ -1393,8 +1393,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Generic APR calculation for any reward strategy
     /// @param poolId The pool ID
-    /// @param periodsToProject Number of periods to project (years for LINEAR as decimal scaled by 1e18, months for MONTHLY, weeks for WEEKLY)
-    /// @return apr Annual Percentage Rate (scaled by 1e18)
+    /// @param periodsToProject Number of periods to project (years for LINEAR as decimal scaled by PRECISION, months for MONTHLY, weeks for WEEKLY)
+    /// @return apr Annual Percentage Rate (scaled by PRECISION)
     function calculateAPR(uint256 poolId, uint256 periodsToProject) public view returns (uint256 apr) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         Pool storage pool = pools[poolId];
@@ -1488,8 +1488,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                     : timeLeftInWeek;
 
                 uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-                uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS;
-                totalPoolRewards += (timeInThisWeek * rewardRate) / PRECISION;
+                uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS;
+                totalPoolRewards += (timeInThisWeek * rewardRate) / (PRECISION * 1e18);
 
                 timeProcessed += timeInThisWeek;
                 currentTime += timeInThisWeek;
@@ -1535,8 +1535,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
                 // Calculate rewards for this time period at this month's rate
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
-                totalPoolRewards += (timeInMonth * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
+                totalPoolRewards += (timeInMonth * rewardRate) / (PRECISION * 1e18);
 
                 timeProcessed += timeInMonth;
                 currentMonthIndex++;
@@ -1604,8 +1604,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 }
 
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
-                totalPoolRewards += (timeInMonth * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
+                totalPoolRewards += (timeInMonth * rewardRate) / (PRECISION * 1e18);
 
                 timeProcessed += timeInMonth;
                 currentMonthIndex++;
@@ -1896,8 +1896,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
             if (pool.totalStaked > 0) {
                 pool.accRewardPerShare +=
-                    (rewardAccrued * PRECISION) /
-                    pool.totalStaked;
+                    (rewardAccrued * PRECISION * 1e18) /
+                    (pool.totalStaked * 1e18);
             }
         }
 
@@ -1918,7 +1918,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         } else if (pool.rewardStrategy == RewardStrategy.MONTHLY) {
             rewardAccrued = _calculateMonthlyRewards(pool, delta);
         } else {
-            rewardAccrued = delta * pool.rewardRatePerSecond;
+            rewardAccrued = (delta * pool.rewardRatePerSecond * 1e18) / 1e18;
         }
     }
 
@@ -1952,8 +1952,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 uint256 monthReward = pool.monthlyRewards[
                     pool.monthlyRewardIndex
                 ];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days; // Rewards per second this month
-                totalRewards += (timeLeftInDelta * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days; // Rewards per second this month
+                totalRewards += (timeLeftInDelta * rewardRate) / (PRECISION * 1e18);
                 timeProcessed = delta; // Done processing
             } else {
                 // Time crosses into next month
@@ -1961,8 +1961,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 uint256 monthReward = pool.monthlyRewards[
                     pool.monthlyRewardIndex
                 ];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days; // Rewards per second this month
-                totalRewards += (timeInThisMonth * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days; // Rewards per second this month
+                totalRewards += (timeInThisMonth * rewardRate) / (PRECISION * 1e18);
 
                 // Advance to next month
                 pool.monthlyRewardIndex++;
@@ -2012,8 +2012,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 : timeLeftInWeek;
 
             uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-            uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS; // Rewards per second this week
-            totalRewards += (timeInThisWeek * rewardRate) / PRECISION;
+            uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS; // Rewards per second this week
+            totalRewards += (timeInThisWeek * rewardRate) / ( PRECISION * 1e18);
 
             timeProcessed += timeInThisWeek;
             currentTime += timeInThisWeek;
@@ -2067,8 +2067,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 : timeLeftInWeek;
 
             uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-            uint256 rewardRate = (weekReward * PRECISION) / WEEK_SECONDS;
-            totalRewards += (timeInThisWeek * rewardRate) / PRECISION;
+            uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS;
+            totalRewards += (timeInThisWeek * rewardRate) / (PRECISION * 1e18);
 
             timeProcessed += timeInThisWeek;
             currentTime += timeInThisWeek;
@@ -2091,7 +2091,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 delta
     ) internal view returns (uint256 rewardAccrued) {
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
-            rewardAccrued = delta * pool.rewardRatePerSecond;
+            rewardAccrued = (delta * pool.rewardRatePerSecond * 1e18) / 1e18;
         } else if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
             // WEEKLY strategy - view-only calculation (no state updates)
             rewardAccrued = _calculateWeeklyRewardsView(pool, delta);
@@ -2130,15 +2130,15 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             if (currentTime + timeLeftInDelta <= monthEndTime) {
                 // All remaining time is within current month
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
-                totalRewards += (timeLeftInDelta * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
+                totalRewards += (timeLeftInDelta * rewardRate) / (PRECISION * 1e18);
                 timeProcessed = delta; // Done processing
             } else {
                 // Time crosses into next month
                 uint256 timeInThisMonth = monthEndTime - currentTime;
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
-                totalRewards += (timeInThisMonth * rewardRate) / PRECISION;
+                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
+                totalRewards += (timeInThisMonth * rewardRate) / (PRECISION * 1e18);
 
                 // Advance to next month (LOCAL variable only)
                 currentMonthIndex++;
