@@ -8,7 +8,7 @@
 - **Token Approvals**: Admin must approve PoolManager to spend ECM and USDT for sale, rewards, and liquidity
 - **Uniswap V2 Pair**: ECM/USDT pair deployed and address known
 - **Penalty Receiver**: Treasury or burn address for slashed tokens
-- **Allowed Stake Durations**: Decide durations (e.g., [30 days, 90 days, 180 days])
+- **Allowed Stake Durations**: Decide durations (e.g., [30 days, 90 days, 180 days]) - users select from these options, no minimum required
 - **Vesting Duration**: Set vesting period for rewards (if using vesting)
 - **Reward Strategy**: Choose LINEAR or MONTHLY, and prepare monthly schedule if needed
 - **Liquidity Reserve**: Decide ECM/USDT amounts for initial liquidity
@@ -152,13 +152,16 @@ const liquidityManager = new ethers.Contract(LiquidityManagerAddress, LiquidityM
 
 ### Purchase & Stake
 ```typescript
+// User selects from allowed stake durations - no minimum lock period enforced
+const selectedDuration = 90 * 24 * 3600; // 90 days (user choice)
 await usdt.approve(poolManager.target, usdtAmount);
-await poolManager.buyAndStake(poolId, maxUsdtAmount, stakeDuration, voucherInput, signature);
+await poolManager.buyAndStake(poolId, maxUsdtAmount, selectedDuration, voucherInput, signature);
 ```
 
 ### Buy Exact ECM & Stake
 ```typescript
-await poolManager.buyExactECMAndStake(poolId, exactEcmAmount, maxUsdtAmount, stakeDuration, voucherInput, signature);
+// Users can choose any allowed duration when staking exact amounts
+await poolManager.buyExactECMAndStake(poolId, exactEcmAmount, maxUsdtAmount, selectedDuration, voucherInput, signature);
 ```
 
 ### Claim Rewards

@@ -111,7 +111,7 @@ describe("SIMULATION: 500 Users - Linear Rewards Strategy", function () {
         // Fund the wallet
         await owner.sendTransaction({
           to: wallet.address,
-          value: parseEther("10"), // 10 ETH for gas
+          value: parseEther("0.5"), // 0.5 ETH for gas
         });
         users.push(wallet);
       }
@@ -252,7 +252,8 @@ describe("SIMULATION: 500 Users - Linear Rewards Strategy", function () {
         // Advance time to this user's stake time (add 1 second buffer to avoid same timestamp)
         const targetTime = Math.max(userData.stakeTime, lastTime + 1);
         if (targetTime > lastTime) {
-          await time.increaseTo(targetTime);
+          const timeAdvance = targetTime - lastTime;
+          await time.increase(timeAdvance);
           lastTime = targetTime;
         }
 
@@ -301,12 +302,17 @@ describe("SIMULATION: 500 Users - Linear Rewards Strategy", function () {
       // Progress through time in chunks to validate linear accumulation
       const CHECKPOINT_DAYS = 25; // Check every 25 days
       const checkpoints = [];
+      let lastCheckpointTime = await time.latest();
       
       for (let day = CHECKPOINT_DAYS; day <= DISTRIBUTION_DAYS; day += CHECKPOINT_DAYS) {
-        const checkpointTime = simulationStartTime + Number(DAY_SECONDS) * day;
+        const targetTime = simulationStartTime + Number(DAY_SECONDS) * day;
+        const timeAdvance = targetTime - lastCheckpointTime;
         
-        // Advance to checkpoint time
-        await time.increaseTo(checkpointTime);
+        // Only advance if we need to go forward
+        if (timeAdvance > 0) {
+          await time.increase(timeAdvance);
+          lastCheckpointTime = targetTime;
+        }
         
         // Trigger pool update by calling pendingRewards for any user with stake
         const sampleUser = simUsers.find(u => u.stakeAmount > 0n);
@@ -334,7 +340,12 @@ describe("SIMULATION: 500 Users - Linear Rewards Strategy", function () {
 
       // Final validation after 200 days
       const finalTime = simulationStartTime + TOTAL_DURATION_SECONDS;
-      await time.increaseTo(finalTime);
+      const finalCurrentTime = await time.latest();
+      const finalAdvance = finalTime - finalCurrentTime;
+      
+      if (finalAdvance > 0) {
+        await time.increase(finalAdvance);
+      }
       
       const finalPoolInfo = await poolManager.getPoolInfo(poolId);
       console.log("📊 Final Pool State After 200 Days:");
@@ -419,7 +430,8 @@ describe("SIMULATION: 500 Users - Linear Rewards Strategy", function () {
 
         // Advance time to unstake time
         if (userData.unstakeTime > lastTime) {
-          await time.increaseTo(userData.unstakeTime);
+          const timeAdvance = userData.unstakeTime - lastTime;
+          await time.increase(timeAdvance);
           lastTime = userData.unstakeTime;
         }
 

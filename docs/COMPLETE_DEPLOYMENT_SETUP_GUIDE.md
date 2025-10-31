@@ -347,12 +347,12 @@ const poolParams = {
     allowedStakeDurations: [
         30 * 24 * 3600,   // 30 days
         90 * 24 * 3600,   // 90 days  
-        180 * 24 * 3600   // 180 days
+        180 * 24 * 3600   // 180 days - users choose from these options
     ],
     maxDuration: 180 * 24 * 3600, // 180 days maximum
     vestingDuration: 180 * 24 * 3600, // 180 days vesting
     vestRewardsByDefault: false, // Don't vest by default
-    penaltyBps: 2500 // 25% penalty for early unstaking
+    penaltyBps: 2500 // 25% penalty for early unstaking (configurable, default business requirement)
 };
 
 const tx = await poolManager.createPool(poolParams);
@@ -557,8 +557,9 @@ const stakeAmount = ethers.parseEther("1000"); // 1000 ECM
 const requiredUsdt = await poolManager.getRequiredUSDTForExactECM(poolId, stakeAmount);
 console.log("Required USDT:", ethers.formatUnits(requiredUsdt, 6));
 
-// User would approve USDT and call buyExactECMAndStake
-// await poolManager.connect(user).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, 90*24*3600, emptyVoucher, "0x");
+// User would approve USDT and select from allowed durations when calling buyExactECMAndStake
+const selectedDuration = 90 * 24 * 3600; // 90 days (user choice from allowed durations)
+// await poolManager.connect(user).buyExactECMAndStake(poolId, stakeAmount, requiredUsdt, selectedDuration, emptyVoucher, "0x");
 ```
 
 ### 11.2 Test Reward Claims

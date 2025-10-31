@@ -842,6 +842,7 @@
         │ 5a. Calculate penalty                 │ 5b. No penalty
         ├──► slashed = user.staked ×           ├──► slashed = 0
         │      pool.penaltyBps / 10000         ├──► remaining = user.staked
+        │      (default: 2500 bps = 25%)       │
         ├──► remaining = user.staked -         │
         │      slashed                         │
         │                                       │

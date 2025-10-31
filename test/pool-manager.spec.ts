@@ -372,7 +372,7 @@ describe("PoolManager & VestingManager", function () {
         expect(await poolManager.vestingManager()).to.equal(vestingManager.target);
         
         // Verify uniswapRouter is set correctly (passed in constructor)
-        const routerAddress = await poolManager.uniswapRouter();
+        const routerAddress = await poolManager.UNISWAP_ROUTER();
         if (USE_MAINNET_ROUTER) {
           // In mainnet fork mode, verify router is the mainnet address
           expect(routerAddress).to.equal(MAINNET_UNISWAP_ROUTER);
@@ -436,7 +436,7 @@ describe("PoolManager & VestingManager", function () {
 
     describe("Uniswap Router & Pair Integration", function () {
       it("Should correctly identify router type (mock vs mainnet)", async function () {
-        const routerAddress = await poolManager.uniswapRouter();
+        const routerAddress = await poolManager.UNISWAP_ROUTER();
         
         if (USE_MAINNET_ROUTER) {
           expect(routerAddress).to.equal(MAINNET_UNISWAP_ROUTER);

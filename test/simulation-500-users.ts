@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import hre, { ethers } from "hardhat";
-import { parseEther, parseUnits, ZeroAddress } from "ethers";
+import { parseEther, parseUnits, formatEther, ZeroAddress } from "ethers";
 import { mine, time } from "@nomicfoundation/hardhat-network-helpers";
 
 /**
@@ -102,14 +102,24 @@ describe("SIMULATION: 500 Users - Weekly Rewards Strategy", function () {
     // If we need more users, create wallet instances
     if (users.length < 500) {
       console.log(`⚠️  Only ${users.length} signers available, creating ${500 - users.length} additional wallets...`);
-      for (let i = users.length; i < 500; i++) {
-        const wallet = ethers.Wallet.createRandom().connect(ethers.provider);
-        // Fund the wallet
-        await owner.sendTransaction({
-          to: wallet.address,
-          value: parseEther("10"), // 10 ETH for gas
-        });
-        users.push(wallet);
+      
+      const ownerBalance = await ethers.provider.getBalance(owner.address);
+      const neededWallets = 500 - users.length;
+      const ethPerWallet = parseEther("0.5");
+      const totalNeeded = ethPerWallet * BigInt(neededWallets);
+      
+      if (ownerBalance < totalNeeded) {
+        console.log(`⚠️  Owner balance insufficient (${formatEther(ownerBalance)} ETH) for ${neededWallets} wallets needing ${formatEther(totalNeeded)} ETH. Using ${users.length} users instead.`);
+      } else {
+        for (let i = users.length; i < 500; i++) {
+          const wallet = ethers.Wallet.createRandom().connect(ethers.provider);
+          // Fund the wallet with less ETH to avoid depleting owner balance
+          await owner.sendTransaction({
+            to: wallet.address,
+            value: ethPerWallet,
+          });
+          users.push(wallet);
+        }
       }
     }
 

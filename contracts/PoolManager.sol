@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Import Uniswap V2 interfaces
-import "./interfaces/IUniswapV2Pair.sol";
-import "./interfaces/IUniswapV2Factory.sol";
-import "./interfaces/IUniswapV2Router02.sol";
-import "./interfaces/IReferralVoucher.sol";
-import "./interfaces/IReferralModule.sol";
+import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
+import {IUniswapV2Router02} from "./interfaces/IUniswapV2Router02.sol";
+import {IReferralVoucher} from "./interfaces/IReferralVoucher.sol";
+import {IReferralModule} from "./interfaces/IReferralModule.sol";
 
 interface IVestingManager {
     function createVesting(
@@ -35,13 +34,13 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // CONSTANTS
     // ============================================
 
-    uint256 public constant PRECISION = 1e27;
+    uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_PURCHASE_ECM = 500 ether; // 500 ECM minimum
     uint256 public constant DEFAULT_PENALTY_BPS = 2500; // 25% slash
     uint256 public constant MAX_BPS = 10000;
 
     uint256 public constant WEEK_SECONDS = 7 * 24 * 3600; // 7 days
-    uint256 public constant weeksInYear = (365 days) / WEEK_SECONDS; // = 52
+    uint256 public constant WEEKS_IN_YEAR = (365 days) / WEEK_SECONDS; // = 52
 
     // ============================================
     // ENUMS & STRUCTS
@@ -80,7 +79,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         /// @notice Total ECM currently staked by all users (equal to 'sold')
         uint256 totalStaked;
         // Reward Distribution (accRewardPerShare Pattern)
-        uint256 accRewardPerShare; // Accumulated rewards per share, scaled by PRECISION (1e27)
+        uint256 accRewardPerShare; // Accumulated rewards per share, scaled by PRECISION (1e18)
         // Formula: sum(rewardRate * timeDelta / totalStaked)
         // Used to calculate: userReward = (userStake * accRewardPerShare / PRECISION) - userRewardDebt
         uint256 lastRewardTime; // Last timestamp when accRewardPerShare was updated
@@ -164,11 +163,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice All pools indexed by poolId
     /// @dev poolId is auto-incremented starting from 0
-    mapping(uint256 => Pool) public pools;
+    mapping(uint256 poolId => Pool pool) public pools;
 
     /// @notice User staking information per pool
     /// @dev userInfo[userAddress][poolId] => UserInfo
-    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
+    mapping(uint256 poolId => mapping(address user => UserInfo info)) public userInfo;
 
     /// @notice Total number of pools created
     /// @dev Used as next poolId when creating new pool
@@ -180,11 +179,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Uniswap V2 Router address
     /// @dev Set via constructor - can be mainnet router or mock for testing
-    IUniswapV2Router02 public immutable uniswapRouter;
+    IUniswapV2Router02 public immutable UNISWAP_ROUTER;
 
     /// @notice Authorized LiquidityManager contracts that can report liquidity additions
     /// @dev Used for callback authorization in recordLiquidityAdded()
-    mapping(address => bool) public authorizedLiquidityManagers;
+    mapping(address manager => bool authorized) public authorizedLiquidityManagers;
 
     /// @notice ReferralVoucher contract for voucher verification
     IReferralVoucher public referralVoucher;
@@ -327,7 +326,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     ///      or mock router address for testing
     constructor(address _uniswapRouter) Ownable(msg.sender) {
         if (_uniswapRouter == address(0)) revert InvalidAddress();
-        uniswapRouter = IUniswapV2Router02(_uniswapRouter);
+        UNISWAP_ROUTER = IUniswapV2Router02(_uniswapRouter);
     }
 
     // ============================================
@@ -349,12 +348,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (params.penaltyBps > MAX_BPS) revert InvalidPenaltyBps();
         if (params.allowedStakeDurations.length == 0) revert InvalidDuration();
         if (params.maxDuration == 0) revert InvalidDuration();
-        for (uint256 i = 0; i < params.allowedStakeDurations.length; i++) {
+        uint256 durationsLength = params.allowedStakeDurations.length;
+        for (uint256 i = 0; i < durationsLength; ++i) {
             uint256 d = params.allowedStakeDurations[i];
             if (d > params.maxDuration) revert InvalidDuration();
         }
 
-        poolId = poolCount++;
+        poolId = poolCount;
+        ++poolCount;
 
         Pool storage pool = pools[poolId];
         pool.id = uint32(poolId);
@@ -423,8 +424,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     // ADMIN FUNCTIONS - REWARD CONFIGURATION
     // ============================================
 
-    /// @notice Configures LINEAR reward strategy
-    /// @param poolId The pool ID
+    /// @notice Configures LINEAR reward strategy rate based on allocated rewards and max duration
+    /// @dev Automatically calculates optimal rate from remaining rewards and max duration
+    /// @dev Only callable for pools with LINEAR reward strategy
+    /// @param poolId The pool ID to configure
     function setLinearRewardRate(uint256 poolId) external onlyOwner {
         if (poolId >= poolCount) revert PoolDoesNotExist();
 
@@ -466,7 +469,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
         // Verify total rewards don't exceed allocated
         uint256 totalMonthly = 0;
-        for (uint256 i = 0; i < monthlyAmounts.length; i++) {
+        uint256 monthlyLength = monthlyAmounts.length;
+        for (uint256 i = 0; i < monthlyLength; ++i) {
             totalMonthly += monthlyAmounts[i];
         }
 
@@ -496,7 +500,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
         // Validate total rewards don't exceed allocated
         uint256 totalWeekly = 0;
-        for (uint256 i = 0; i < weeklyAmounts.length; i++) {
+        uint256 weeklyLength = weeklyAmounts.length;
+        for (uint256 i = 0; i < weeklyLength; ++i) {
             totalWeekly += weeklyAmounts[i];
         }
         if (totalWeekly > pool.allocatedForRewards) revert ExceedsAllocation();
@@ -575,7 +580,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         emit PoolActiveStatusChanged(poolId, active);
     }
 
-    /// @notice Sets the VestingManager contract address
+    /// @notice Sets the VestingManager contract address for handling reward vesting
+    /// @dev Must be a valid contract address implementing IVestingManager interface
     /// @param _vestingManager Address of the VestingManager contract
     function setVestingManager(address _vestingManager) external onlyOwner {
         if (_vestingManager == address(0)) revert InvalidAddress();
@@ -583,7 +589,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         emit VestingManagerSet(_vestingManager);
     }
 
-    /// @notice Sets the ReferralVoucher contract address
+    /// @notice Sets the ReferralVoucher contract address for handling referral systems
+    /// @dev Must be a valid contract address implementing IReferralVoucher interface
     /// @param _referralVoucher Address of the ReferralVoucher contract
     function setReferralVoucher(address _referralVoucher) external onlyOwner {
         if (_referralVoucher == address(0)) revert InvalidAddress();
@@ -690,7 +697,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    // Called by an authorized LiquidityManager to return ECM that was not added to Uniswap
+    /// @notice Allows authorized liquidity managers to return unused ECM to the pool
+    /// @dev Only callable by addresses in the authorizedLiquidityManagers mapping
+    /// @param poolId The pool ID to refill
+    /// @param ecmAmount Amount of ECM to return to the pool
     function refillPoolManager(uint256 poolId, uint256 ecmAmount) external {
         if (!authorizedLiquidityManagers[msg.sender])
             revert NotAuthorizedLiquidityManager();
@@ -734,22 +744,18 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     }
 
     // ============================================
-    // USER FUNCTIONS - BUY & STAKE
+    // INTERNAL HELPER FUNCTIONS - BUY & STAKE
     // ============================================
 
-    /// @notice Buy ECM with USDT and auto-stake in a single transaction
+    /// @notice Validates buy and stake parameters
     /// @param poolId The pool ID
     /// @param maxUsdtAmount Maximum USDT willing to spend
     /// @param selectedStakeDuration Selected staking duration
-    /// @param voucherInput Referral voucher data (optional - use zero values if no referral)
-    /// @param voucherSignature EIP-712 signature for voucher (optional)
-    function buyAndStake(
+    function _validateBuyAndStakeParams(
         uint256 poolId,
         uint256 maxUsdtAmount,
-        uint256 selectedStakeDuration,
-        IReferralVoucher.VoucherInput calldata voucherInput,
-        bytes calldata voucherSignature
-    ) external nonReentrant whenNotPaused {
+        uint256 selectedStakeDuration
+    ) internal view {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (maxUsdtAmount == 0) revert InvalidAmount();
 
@@ -757,12 +763,21 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (!pool.active) revert PoolNotActive();
         if (!_isAllowedDuration(poolId, selectedStakeDuration))
             revert InvalidStakeDuration();
+    }
 
-        // Update pool rewards
-        _updatePoolRewards(poolId);
+    /// @notice Calculates purchase amounts for buy and stake
+    /// @param poolId The pool ID
+    /// @param maxUsdtAmount Maximum USDT willing to spend
+    /// @return ecmToAllocate ECM amount to allocate
+    /// @return usdtRequired USDT amount required
+    function _calculatePurchaseAmounts(
+        uint256 poolId,
+        uint256 maxUsdtAmount
+    ) internal view returns (uint256 ecmToAllocate, uint256 usdtRequired) {
+        Pool storage pool = pools[poolId];
 
         // Get price and calculate ECM amount
-        uint256 ecmToAllocate = _getECMAmountOut(poolId, maxUsdtAmount);
+        ecmToAllocate = _getECMAmountOut(poolId, maxUsdtAmount);
 
         // Check minimum purchase
         if (ecmToAllocate < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
@@ -772,10 +787,22 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             revert InsufficientPoolECM();
 
         // Calculate exact USDT required
-        uint256 usdtRequired = _getUSDTAmountIn(poolId, ecmToAllocate);
+        usdtRequired = _getUSDTAmountIn(poolId, ecmToAllocate);
 
         // Slippage check
         if (usdtRequired > maxUsdtAmount) revert SlippageExceeded();
+    }
+
+    /// @notice Executes the purchase transaction
+    /// @param poolId The pool ID
+    /// @param usdtRequired USDT amount required
+    /// @param ecmToAllocate ECM amount to allocate
+    function _executePurchase(
+        uint256 poolId,
+        uint256 usdtRequired,
+        uint256 ecmToAllocate
+    ) internal {
+        Pool storage pool = pools[poolId];
 
         // Transfer USDT from user
         pool.usdt.safeTransferFrom(msg.sender, address(this), usdtRequired);
@@ -783,10 +810,23 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // Update pool accounting
         pool.sold += ecmToAllocate;
         pool.collectedUSDT += usdtRequired;
+    }
 
-        // Handle referral voucher if provided
-        address referrer = address(0);
-        bytes32 codeHash = bytes32(0);
+    /// @notice Handles referral voucher processing
+    /// @param poolId The pool ID
+    /// @param ecmToAllocate ECM amount to allocate
+    /// @param voucherInput Referral voucher data
+    /// @param voucherSignature EIP-712 signature for voucher
+    /// @return referrer Referrer address
+    /// @return codeHash Code hash
+    function _handleReferralVoucher(
+        uint256 poolId,
+        uint256 ecmToAllocate,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) internal returns (address referrer, bytes32 codeHash) {
+        Pool storage pool = pools[poolId];
+        
         if (address(referralVoucher) != address(0) && voucherInput.vid != bytes32(0)) {
             IReferralVoucher.VoucherResult memory voucherResult = referralVoucher.verifyAndConsume(
                 voucherInput,
@@ -810,21 +850,75 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 );
             }
         }
+    }
 
-        // Update user info and auto-stake
+    /// @notice Validates buy exact ECM parameters
+    /// @param poolId The pool ID
+    /// @param exactEcmAmount Exact ECM amount to buy
+    /// @param maxUsdtAmount Maximum USDT willing to spend
+    /// @param selectedStakeDuration Selected staking duration
+    function _validateBuyExactECMParams(
+        uint256 poolId,
+        uint256 exactEcmAmount,
+        uint256 maxUsdtAmount,
+        uint256 selectedStakeDuration
+    ) internal view {
+        if (poolId >= poolCount) revert PoolDoesNotExist();
+        if (exactEcmAmount == 0) revert InvalidAmount();
+        if (exactEcmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
+        if (maxUsdtAmount == 0) revert InvalidAmount();
+
+        Pool storage pool = pools[poolId];
+        if (!pool.active) revert PoolNotActive();
+        if (!_isAllowedDuration(poolId, selectedStakeDuration))
+            revert InvalidStakeDuration();
+    }
+
+    /// @notice Calculates and validates exact ECM purchase
+    /// @param poolId The pool ID
+    /// @param exactEcmAmount Exact ECM amount to buy
+    /// @param maxUsdtAmount Maximum USDT willing to spend
+    /// @return usdtRequired USDT amount required
+    function _calculateExactECMPurchase(
+        uint256 poolId,
+        uint256 exactEcmAmount,
+        uint256 maxUsdtAmount
+    ) internal view returns (uint256 usdtRequired) {
+        Pool storage pool = pools[poolId];
+
+        // Check pool inventory
+        if (exactEcmAmount > pool.allocatedForSale - pool.sold)
+            revert InsufficientPoolECM();
+
+        // Calculate exact USDT required
+        usdtRequired = _getUSDTAmountIn(poolId, exactEcmAmount);
+
+        // Slippage check
+        if (usdtRequired > maxUsdtAmount) revert SlippageExceeded();
+    }
+
+    /// @notice Executes auto-staking logic
+    /// @param poolId The pool ID
+    /// @param ecmToAllocate ECM amount to stake
+    /// @param selectedStakeDuration Selected staking duration
+    function _executeAutoStake(
+        uint256 poolId,
+        uint256 ecmToAllocate,
+        uint256 selectedStakeDuration
+    ) internal {
+        Pool storage pool = pools[poolId];
         UserInfo storage user = userInfo[poolId][msg.sender];
 
         // Track unique stakers
         if (!user.hasStaked) {
             user.hasStaked = true;
             user.firstStakeTimestamp = block.timestamp;
-            pool.totalUniqueStakers++;
+            ++pool.totalUniqueStakers;
         }
 
         // If user already has stake, accumulate pending rewards
         if (user.staked > 0) {
-            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
-                PRECISION;
+            uint256 accumulated = (user.staked * pool.accRewardPerShare) / PRECISION;
             if (accumulated > user.rewardDebt) {
                 uint256 pending = accumulated - user.rewardDebt;
                 user.pendingRewards += pending;
@@ -847,6 +941,47 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (pool.totalStaked > pool.peakTotalStaked) {
             pool.peakTotalStaked = pool.totalStaked;
         }
+    }
+
+    // ============================================
+    // USER FUNCTIONS - BUY & STAKE
+    // ============================================
+
+    /// @notice Buy ECM with USDT and auto-stake in a single transaction
+    /// @param poolId The pool ID
+    /// @param maxUsdtAmount Maximum USDT willing to spend
+    /// @param selectedStakeDuration Selected staking duration
+    /// @param voucherInput Referral voucher data (optional - use zero values if no referral)
+    /// @param voucherSignature EIP-712 signature for voucher (optional)
+    function buyAndStake(
+        uint256 poolId,
+        uint256 maxUsdtAmount,
+        uint256 selectedStakeDuration,
+        IReferralVoucher.VoucherInput calldata voucherInput,
+        bytes calldata voucherSignature
+    ) external nonReentrant whenNotPaused {
+        // Basic parameter validation
+        _validateBuyAndStakeParams(poolId, maxUsdtAmount, selectedStakeDuration);
+
+        // Update pool rewards before any changes
+        _updatePoolRewards(poolId);
+
+        // Calculate purchase amounts
+        (uint256 ecmToAllocate, uint256 usdtRequired) = _calculatePurchaseAmounts(poolId, maxUsdtAmount);
+
+        // Execute purchase transaction
+        _executePurchase(poolId, usdtRequired, ecmToAllocate);
+
+        // Handle referral voucher
+        (address referrer, bytes32 codeHash) = _handleReferralVoucher(
+            poolId,
+            ecmToAllocate,
+            voucherInput,
+            voucherSignature
+        );
+
+        // Execute auto-staking
+        _executeAutoStake(poolId, ecmToAllocate, selectedStakeDuration);
 
         emit BoughtAndStaked(
             poolId,
@@ -874,98 +1009,28 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         IReferralVoucher.VoucherInput calldata voucherInput,
         bytes calldata voucherSignature
     ) external nonReentrant whenNotPaused {
-        if (poolId >= poolCount) revert PoolDoesNotExist();
-        if (exactEcmAmount == 0) revert InvalidAmount();
-        if (exactEcmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
+        // Validate exact ECM specific parameters
+        _validateBuyExactECMParams(poolId, exactEcmAmount, maxUsdtAmount, selectedStakeDuration);
 
-        Pool storage pool = pools[poolId];
-        if (!pool.active) revert PoolNotActive();
-        if (!_isAllowedDuration(poolId, selectedStakeDuration))
-            revert InvalidStakeDuration();
-
-        // Update pool rewards
+        // Update pool rewards before any changes
         _updatePoolRewards(poolId);
 
-        // Check pool inventory
-        if (exactEcmAmount > pool.allocatedForSale - pool.sold)
-            revert InsufficientPoolECM();
+        // Calculate and validate exact purchase amounts
+        uint256 usdtRequired = _calculateExactECMPurchase(poolId, exactEcmAmount, maxUsdtAmount);
 
-        // Calculate exact USDT required
-        uint256 usdtRequired = _getUSDTAmountIn(poolId, exactEcmAmount);
+        // Execute purchase transaction
+        _executePurchase(poolId, usdtRequired, exactEcmAmount);
 
-        // Slippage check
-        if (usdtRequired > maxUsdtAmount) revert SlippageExceeded();
+        // Handle referral voucher
+        (address referrer, bytes32 codeHash) = _handleReferralVoucher(
+            poolId,
+            exactEcmAmount,
+            voucherInput,
+            voucherSignature
+        );
 
-        // Transfer USDT from user
-        pool.usdt.safeTransferFrom(msg.sender, address(this), usdtRequired);
-
-        // Update pool accounting
-        pool.sold += exactEcmAmount;
-        pool.collectedUSDT += usdtRequired;
-
-        // Handle referral voucher if provided
-        address referrer = address(0);
-        bytes32 codeHash = bytes32(0);
-        if (address(referralVoucher) != address(0) && voucherInput.vid != bytes32(0)) {
-            IReferralVoucher.VoucherResult memory voucherResult = referralVoucher.verifyAndConsume(
-                voucherInput,
-                voucherSignature,
-                msg.sender
-            );
-            referrer = voucherResult.owner;
-            codeHash = voucherResult.codeHash;
-
-            // Record purchase and pay/accrue direct commission
-            if (address(referralModule) != address(0)) {
-                referralModule.recordPurchaseAndPayDirect(
-                    codeHash,
-                    msg.sender,
-                    referrer,
-                    poolId,
-                    exactEcmAmount,
-                    address(pool.ecm),
-                    voucherResult.directBps,
-                    voucherResult.transferOnUse
-                );
-            }
-        }
-
-        // Update user info and auto-stake
-        UserInfo storage user = userInfo[poolId][msg.sender];
-
-        // Track unique stakers
-        if (!user.hasStaked) {
-            user.hasStaked = true;
-            user.firstStakeTimestamp = block.timestamp;
-            pool.totalUniqueStakers++;
-        }
-
-        // If user already has stake, accumulate pending rewards
-        if (user.staked > 0) {
-            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
-                PRECISION;
-            if (accumulated > user.rewardDebt) {
-                uint256 pending = accumulated - user.rewardDebt;
-                user.pendingRewards += pending;
-            }
-        }
-
-        // Auto-stake
-        user.staked += exactEcmAmount;
-        user.stakeStart = block.timestamp;
-        user.stakeDuration = selectedStakeDuration;
-        pool.totalStaked += exactEcmAmount;
-        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
-
-        // Update historical tracking
-        user.totalStaked += exactEcmAmount;
-        user.lastActionTimestamp = block.timestamp;
-        pool.lifetimeStakeVolume += exactEcmAmount;
-
-        // Update peak staked if necessary
-        if (pool.totalStaked > pool.peakTotalStaked) {
-            pool.peakTotalStaked = pool.totalStaked;
-        }
+        // Execute auto-staking
+        _executeAutoStake(poolId, exactEcmAmount, selectedStakeDuration);
 
         emit BoughtAndStaked(
             poolId,
@@ -978,6 +1043,25 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
+    /// @notice Validates stake ECM parameters
+    /// @param poolId The pool ID
+    /// @param ecmAmount ECM amount to stake
+    /// @param selectedStakeDuration Selected staking duration
+    function _validateStakeECMParams(
+        uint256 poolId,
+        uint256 ecmAmount,
+        uint256 selectedStakeDuration
+    ) internal view {
+        if (poolId >= poolCount) revert PoolDoesNotExist();
+        if (ecmAmount == 0) revert InvalidAmount();
+        if (ecmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
+
+        Pool storage pool = pools[poolId];
+        if (!pool.active) revert PoolNotActive();
+        if (!_isAllowedDuration(poolId, selectedStakeDuration))
+            revert InvalidStakeDuration();
+    }
+
     /// @notice Stake ECM tokens directly (for users who already own ECM)
     /// @param poolId The pool ID
     /// @param ecmAmount Amount of ECM to stake (minimum 500 ECM)
@@ -987,14 +1071,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 ecmAmount,
         uint256 selectedStakeDuration
     ) external nonReentrant whenNotPaused {
-        if (poolId >= poolCount) revert PoolDoesNotExist();
-        if (ecmAmount == 0) revert InvalidAmount();
-        if (ecmAmount < MIN_PURCHASE_ECM) revert MinPurchaseNotMet();
+        // Parameter validation
+        _validateStakeECMParams(poolId, ecmAmount, selectedStakeDuration);
 
         Pool storage pool = pools[poolId];
-        if (!pool.active) revert PoolNotActive();
-        if (!_isAllowedDuration(poolId, selectedStakeDuration))
-            revert InvalidStakeDuration();
 
         // Update pool rewards
         _updatePoolRewards(poolId);
@@ -1002,42 +1082,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         // Transfer ECM from user
         pool.ecm.safeTransferFrom(msg.sender, address(this), ecmAmount);
 
-        // Update user info
-        UserInfo storage user = userInfo[poolId][msg.sender];
-
-        // Track unique stakers
-        if (!user.hasStaked) {
-            user.hasStaked = true;
-            user.firstStakeTimestamp = block.timestamp;
-            pool.totalUniqueStakers++;
-        }
-
-        // If user already has stake, accumulate pending rewards
-        if (user.staked > 0) {
-            uint256 accumulated = (user.staked * pool.accRewardPerShare) /
-                PRECISION;
-            if (accumulated > user.rewardDebt) {
-                uint256 pending = accumulated - user.rewardDebt;
-                user.pendingRewards += pending;
-            }
-        }
-
-        // Stake the ECM
-        user.staked += ecmAmount;
-        user.stakeStart = block.timestamp;
-        user.stakeDuration = selectedStakeDuration;
-        pool.totalStaked += ecmAmount;
-        user.rewardDebt = (user.staked * pool.accRewardPerShare) / PRECISION;
-
-        // Update historical tracking
-        user.totalStaked += ecmAmount;
-        user.lastActionTimestamp = block.timestamp;
-        pool.lifetimeStakeVolume += ecmAmount;
-
-        // Update peak staked if necessary
-        if (pool.totalStaked > pool.peakTotalStaked) {
-            pool.peakTotalStaked = pool.totalStaked;
-        }
+        // Execute staking using helper function
+        _executeAutoStake(poolId, ecmAmount, selectedStakeDuration);
 
         emit ECMStaked(poolId, msg.sender, ecmAmount, selectedStakeDuration);
     }
@@ -1268,13 +1314,25 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         Pool storage pool = pools[poolId];
         UserInfo storage userInf = userInfo[poolId][user];
 
+        if (userInf.staked == 0) return 0;
+
         uint256 accRewardPerShare = pool.accRewardPerShare;
 
-        // Calculate updated accRewardPerShare
+        // Calculate updated accRewardPerShare, but cap to user's maturity time
         if (block.timestamp > pool.lastRewardTime && pool.totalStaked > 0) {
-            uint256 delta = block.timestamp - pool.lastRewardTime;
-            uint256 rewardAccrued = _calculateRewardAccruedView(pool, delta);
-            accRewardPerShare += (rewardAccrued * PRECISION * 1e18) / (pool.totalStaked * 1e18);
+            uint256 currentTime = block.timestamp;
+            uint256 userMaturityTime = userInf.stakeStart + userInf.stakeDuration;
+            
+            // 🚨 CRITICAL FIX: Only calculate rewards up to user's maturity time
+            if (userMaturityTime < currentTime) {
+                currentTime = userMaturityTime;
+            }
+            
+            if (currentTime > pool.lastRewardTime) {
+                uint256 delta = currentTime - pool.lastRewardTime;
+                uint256 rewardAccrued = _calculateRewardAccruedView(pool, delta);
+                accRewardPerShare += (rewardAccrued * PRECISION * 1e18) / (pool.totalStaked * 1e18);
+            }
         }
 
         pending =
@@ -1393,7 +1451,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Generic APR calculation for any reward strategy
     /// @param poolId The pool ID
-    /// @param periodsToProject Number of periods to project (years for LINEAR as decimal scaled by PRECISION, months for MONTHLY, weeks for WEEKLY)
+    /// @param periodsToProject Number of periods to project (years for LINEAR as decimal 
+    ///        scaled by PRECISION, months for MONTHLY, weeks for WEEKLY)
     /// @return apr Annual Percentage Rate (scaled by PRECISION)
     function calculateAPR(uint256 poolId, uint256 periodsToProject) public view returns (uint256 apr) {
         if (poolId >= poolCount) revert PoolDoesNotExist();
@@ -1403,14 +1462,14 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         }
 
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
-            uint256 SECONDS_PER_YEAR = 31557600; // 365.25 days
+            uint256 secondsPerYear = 31557600; // 365.25 days
             // periodsToProject represents years (scaled by 1e18, so 1e18 = 1 year, 5e17 = 0.5 year)
-            uint256 periodRewards = (pool.rewardRatePerSecond * SECONDS_PER_YEAR * periodsToProject) / PRECISION;
+            uint256 periodRewards = (pool.rewardRatePerSecond * secondsPerYear * periodsToProject) / PRECISION;
             apr = (periodRewards * PRECISION * 100) / pool.totalStaked;
         } else if (pool.rewardStrategy == RewardStrategy.MONTHLY) {
             // Sum next N months of rewards
             uint256 projectedRewards = 0;
-            for (uint256 i = 0; i < periodsToProject; i++) {
+            for (uint256 i = 0; i < periodsToProject; ++i) {
                 uint256 monthIndex = pool.monthlyRewardIndex + i;
                 if (monthIndex < pool.monthlyRewards.length) {
                     projectedRewards += pool.monthlyRewards[monthIndex];
@@ -1425,11 +1484,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             uint256 currentWeekIndex = pool.weeklyRewardIndex;
             while (weeksProcessed < periodsToProject && currentWeekIndex < pool.weeklyRewards.length) {
                 projectedRewards += pool.weeklyRewards[currentWeekIndex];
-                weeksProcessed++;
-                currentWeekIndex++;
+                ++weeksProcessed;
+                ++currentWeekIndex;
             }
 
-            apr = (projectedRewards * PRECISION * weeksInYear * 100) / periodsToProject;
+            apr = (projectedRewards * PRECISION * WEEKS_IN_YEAR * 100) / periodsToProject;
             apr = apr / pool.totalStaked;
         } else {
             apr = 0;
@@ -1539,7 +1598,7 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 totalPoolRewards += (timeInMonth * rewardRate) / (PRECISION * 1e18);
 
                 timeProcessed += timeInMonth;
-                currentMonthIndex++;
+                ++currentMonthIndex;
             }
 
             // User's share of total pool rewards
@@ -1659,8 +1718,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
         if (pool.allocatedForSale == 0) return 0;
 
-        // Utilization = (sold / allocatedForSale) * 100
-        utilizationRate = (pool.sold * PRECISION * 100) / pool.allocatedForSale;
+        // Utilization = (sold / allocatedForSale) * PRECISION (1e18 = 100%)
+        utilizationRate = (pool.sold * PRECISION) / pool.allocatedForSale;
     }
 
     /// @notice Calculate reward pool depletion time
@@ -1699,10 +1758,11 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         } else {
             // For MONTHLY, calculate based on remaining months
             uint256 totalMonthlyRemaining = 0;
+            uint256 monthlyRewardsLength = pool.monthlyRewards.length;
             for (
                 uint256 i = pool.monthlyRewardIndex;
-                i < pool.monthlyRewards.length;
-                i++
+                i < monthlyRewardsLength;
+                ++i
             ) {
                 totalMonthlyRemaining += pool.monthlyRewards[i];
             }
@@ -1859,7 +1919,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
      * @custom:math accRewardPerShare += (rewardAccrued * 1e18) / totalStaked
      * @custom:purpose Tracks cumulative rewards per staked ECM, enables precise reward calculation for all users
      * @custom:scaling Uses 1e18 scaling to prevent precision loss in integer division
-     * @custom:example If totalStaked = 1000 ECM, rewardAccrued = 10 ECM, then accRewardPerShare increases by (10 * 1e18) / 1000
+     * @custom:example If totalStaked = 1000 ECM, rewardAccrued = 10 ECM, then 
+     *               accRewardPerShare increases by (10 * 1e18) / 1000
      * User with 100 staked gets: (100 * accRewardPerShare) / 1e18 = 1 ECM reward
      * Caps rewardAccrued to remaining rewards, disables accrual when depleted.
      * @param poolId The pool ID
@@ -2099,6 +2160,13 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             // MONTHLY strategy - view-only calculation (no state updates)
             rewardAccrued = _calculateMonthlyRewardsView(pool, delta);
         }
+
+        // 🚨 CRITICAL FIX: Apply the same capping logic as _updatePoolRewards
+        // Prevent view functions from showing unlimited rewards
+        uint256 remainingRewards = pool.allocatedForRewards - pool.totalRewardsAccrued;
+        if (rewardAccrued > remainingRewards) {
+            rewardAccrued = remainingRewards;
+        }
     }
 
     /// @notice Calculates monthly rewards WITHOUT modifying state (VIEW ONLY)
@@ -2221,7 +2289,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     /// @param usdtAmountIn USDT amount in
     /// @return ecmAmountOut ECM amount out
     /// @dev Uses spot price from Uniswap V2 pair reserves (NO TWAP)
-    /// @dev Calculates locally using Uniswap V2 formula: (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
+    /// @dev Calculates locally using Uniswap V2 formula: 
+    ///      (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
     function _getECMAmountOut(
         uint256 poolId,
         uint256 usdtAmountIn
@@ -2301,8 +2370,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
     ) internal view returns (bool allowed) {
         Pool storage pool = pools[poolId];
         uint256[] memory durations = pool.allowedStakeDurations;
+        uint256 durationsLength = durations.length;
 
-        for (uint256 i = 0; i < durations.length; i++) {
+        for (uint256 i = 0; i < durationsLength; ++i) {
             if (durations[i] == duration) {
                 return true;
             }
