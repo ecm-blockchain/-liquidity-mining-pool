@@ -33,10 +33,11 @@ This system enables users to purchase ECM tokens with USDT using referral codes,
   - All purchased ECM is automatically staked (no idle balances)
 
 - **Three Reward Strategies**
-  - **LINEAR**: Constant reward rate per second (e.g., 1 ECM/sec)
+  - **LINEAR**: Constant reward rate per second (auto-calculated from remaining rewards and maxDuration)
   - **MONTHLY**: Variable rates per month with automatic month progression
   - **WEEKLY**: Variable rates per week with automatic week progression
   - Uses canonical `accRewardPerShare` pattern (scaled by 1e18) for precision
+  - Automatic rate capping when rewards depleted
 
 - **Referral System Integration**
   - EIP-712 voucher verification via ReferralVoucher contract
@@ -154,8 +155,8 @@ const pairAddress = await factory.getPair(ecm.target, usdt.target);
 ```ts
 // Authorize contracts
 await poolManager.setVestingManager(vestingManager.target);
-await poolManager.addAuthorizedVestingManager(vestingManager.target);
 await poolManager.addAuthorizedLiquidityManager(liquidityManager.target);
+// Note: addAuthorizedVestingManager() does not exist - only addAuthorizedLiquidityManager()
 
 // Create pool with LINEAR reward strategy
 const poolParams = {
@@ -163,12 +164,13 @@ const poolParams = {
   usdt: usdt.target,
   pair: pairAddress,
   penaltyReceiver: deployer.address, // Treasury for slashed tokens
-  rewardStrategy: 0, // 0 = LINEAR, 1 = MONTHLY
+  rewardStrategy: 0, // 0 = LINEAR, 1 = MONTHLY, 2 = WEEKLY
   allowedStakeDurations: [
     30 * 24 * 60 * 60,  // 30 days
     90 * 24 * 60 * 60,  // 90 days
     180 * 24 * 60 * 60  // 180 days - users select from these durations
   ],
+  maxDuration: 180 * 24 * 60 * 60, // Maximum allowed staking duration (required)
   vestingDuration: 180 * 24 * 60 * 60, // 6 months vesting
   vestRewardsByDefault: false,
   penaltyBps: 2500 // 25% penalty for early unstake
@@ -182,8 +184,8 @@ await ecm.approve(poolManager.target, ethers.parseEther("1000000"));
 await poolManager.allocateForSale(poolId, ethers.parseEther("500000"));
 await poolManager.allocateForRewards(poolId, ethers.parseEther("100000"));
 
-// Set reward rate (LINEAR strategy)
-await poolManager.setLinearRewardRate(poolId, ethers.parseEther("1")); // 1 ECM/second
+// Set reward rate (LINEAR strategy - auto-calculates optimal rate)
+await poolManager.setLinearRewardRate(poolId); // No rate parameter, calculates from remaining rewards and maxDuration
 ```
 
 ### 4) User Buy & Stake
@@ -463,7 +465,8 @@ function setPoolActive(uint256 poolId, bool active) external onlyOwner
 
 #### Reward Configuration
 ```solidity
-// LINEAR strategy - automatically calculates rate based on maxDuration
+// LINEAR strategy - auto-calculates optimal rate from remaining rewards and maxDuration
+// Formula: rewardRatePerSecond = (remainingRewards * 1e18) / (maxDuration * 1e18)
 function setLinearRewardRate(uint256 poolId) external onlyOwner
 
 // MONTHLY strategy
@@ -486,7 +489,7 @@ function setVestingManager(address _vestingManager) external onlyOwner
 // Set ReferralVoucher
 function setReferralVoucher(address _referralVoucher) external onlyOwner
 
-// Set ReferralModule
+// Set ReferralModule (also need to call referralVoucher.setReferralModule() separately as owner)
 function setReferralModule(address _referralModule) external onlyOwner
 
 // Authorize LiquidityManager
@@ -494,6 +497,8 @@ function addAuthorizedLiquidityManager(address manager) external onlyOwner
 function removeAuthorizedLiquidityManager(address manager) external onlyOwner
 
 // Transfer to LiquidityManager
+// ECM comes from sold/staked pool (up to totalStaked - liquidityPoolOwedECM)
+// USDT comes from collectedUSDT
 function transferToLiquidityManager(
     uint256 poolId,
     address liquidityManager,
@@ -501,23 +506,23 @@ function transferToLiquidityManager(
     uint256 usdtAmount
 ) external onlyOwner
 
-// Callback from LiquidityManager (called by authorized contracts)
+// Callback from LiquidityManager (called by authorized contracts only)
 function recordLiquidityAdded(
     uint256 poolId,
     uint256 ecmAmount,
     uint256 usdtAmount
 ) external
 
-// Refill pool from LiquidityManager (called by authorized contracts)
+// Refill pool from LiquidityManager (called by authorized contracts to return unused ECM)
 function refillPoolManager(uint256 poolId, uint256 ecmAmount) external
 ```
 
 #### Emergency & Governance
 ```solidity
-// Emergency token recovery
+// Emergency token recovery (never touches user-staked tokens)
 function emergencyRecoverTokens(address token, uint256 amount, address to) external onlyOwner
 
-// Pause/unpause operations
+// Pause/unpause operations (inherited from Pausable)
 function pause() external onlyOwner
 function unpause() external onlyOwner
 ```
@@ -526,7 +531,7 @@ function unpause() external onlyOwner
 
 #### Buying & Staking
 ```solidity
-// Buy with max USDT amount (referral optional)
+// Buy with max USDT amount (referral optional - use empty/zero voucher if no referral)
 function buyAndStake(
     uint256 poolId,
     uint256 maxUsdtAmount,
@@ -535,12 +540,25 @@ function buyAndStake(
     bytes calldata voucherSignature
 ) external nonReentrant whenNotPaused
 
-// Buy exact ECM amount (referral optional)
+// Buy exact ECM amount (minimum 500 ECM, referral optional)
 function buyExactECMAndStake(
     uint256 poolId,
     uint256 exactEcmAmount,
     uint256 maxUsdtAmount,
     uint256 selectedStakeDuration,
+    IReferralVoucher.VoucherInput calldata voucherInput,
+    bytes calldata voucherSignature
+) external nonReentrant whenNotPaused
+
+// Direct staking (for users who already own ECM)
+function stakeECM(
+    uint256 poolId,
+    uint256 ecmAmount,
+    uint256 selectedStakeDuration
+) external nonReentrant whenNotPaused
+
+// Set referrer after purchase (one-time only)
+function setMyReferrer(
     IReferralVoucher.VoucherInput calldata voucherInput,
     bytes calldata voucherSignature
 ) external nonReentrant whenNotPaused
@@ -728,18 +746,21 @@ function removeIssuer(address issuer) external onlyOwner
 // Revoke specific voucher ID (emergency)
 function revokeVoucher(bytes32 vid) external onlyOwner
 
-// Set PoolManager address (one-time setup)
+// Set PoolManager address (authorizes PoolManager to call verifyAndConsume)
 function setPoolManager(address _poolManager) external onlyOwner
+
+// Set ReferralModule address (authorizes ReferralModule to call verifyAndConsume)
+function setReferralModule(address _referralModule) external onlyOwner
 ```
 
-#### PoolManager Integration
+#### PoolManager/ReferralModule Integration
 ```solidity
-// Verify and consume voucher (only callable by PoolManager)
+// Verify and consume voucher (only callable by authorized contracts: PoolManager or ReferralModule)
 function verifyAndConsume(
     VoucherInput calldata voucherInput,
     bytes calldata signature,
     address redeemer
-) external onlyPoolManager returns (VoucherResult memory)
+) external onlyAuthorizedCaller returns (VoucherResult memory)
 ```
 
 **Verification Flow:**
@@ -980,10 +1001,10 @@ function recordPurchaseAndPayDirect(
     address referrer,
     uint256 poolId,
     uint256 stakedAmount,
-    IERC20 token,
+    address token,
     uint16 directBps,
     bool transferOnUse
-) external onlyPoolManager
+) external onlyPoolManager nonReentrant returns (uint256 directAmount)
 ```
 
 **Process:**
@@ -998,14 +1019,43 @@ function recordPurchaseAndPayDirect(
 
 ##### Withdraw Accrued Direct Commissions
 ```solidity
+// User withdraws their own accrued commissions
 function withdrawDirectAccrual(uint256 amount) external nonReentrant
+
+// Admin withdraws on behalf of user (emergency or convenience)
+function withdrawDirectAccrualFor(address referrer, uint256 amount, address to) external onlyOwner nonReentrant
 ```
-- **Caller**: Referrer
+- **Caller**: Referrer (self-service) or Owner (on behalf of user)
 - **Purpose**: Withdraw accumulated direct commissions
 - **Process**:
-  1. Verify `directAccrued[msg.sender] >= amount`
-  2. Deduct: `directAccrued[msg.sender] -= amount`
-  3. Transfer ECM to msg.sender
+  1. Verify `directAccrued[referrer] >= amount`
+  2. Get stored token address: `token = accruedToken[referrer]`
+  3. Deduct: `directAccrued[referrer] -= amount`
+  4. Transfer token to recipient
+
+##### Set Referrer After Purchase (One-Time Only)
+```solidity
+// Direct call from user
+function setMyReferrer(
+    IReferralVoucher.VoucherInput calldata voucherInput,
+    bytes calldata voucherSignature
+) external nonReentrant
+
+// Delegated call via PoolManager (recommended for UX)
+function setMyReferrerFor(
+    address user,
+    IReferralVoucher.VoucherInput calldata voucherInput,
+    bytes calldata voucherSignature
+) external onlyPoolManager nonReentrant
+```
+- **Purpose**: Allow users to add referral code after initial purchase (one-time only)
+- **Requirements**: User must not have referrer set (`referrerOf[user] == address(0)`)
+- **Process**:
+  1. Verify referrer not already set
+  2. Verify voucher via ReferralVoucher contract
+  3. Check anti-gaming rules (no self-referral, no cycles)
+  4. Set referrer: `referrerOf[user] = referrer`
+- **Note**: No direct commission paid for late referrer setting; only affects future reward claims
 
 #### Multi-Level Commission (Tier 2)
 
@@ -1058,17 +1108,23 @@ function claimReferral(
 #### Configuration
 
 ```solidity
-// Set multi-level commission rates per pool
+// Set multi-level commission rates per pool (max 10 levels, sum ≤ 50%)
 function setPoolLevelConfig(
     uint256 poolId,
     uint16[] calldata mlBps
 ) external onlyOwner
 
-// Set PoolManager address
+// Set PoolManager address (authorizes PoolManager to call integration functions)
 function setPoolManager(address _poolManager) external onlyOwner
 
+// Set ReferralVoucher address (for voucher verification)
+function setReferralVoucher(address _referralVoucher) external onlyOwner
+
 // Fund contract with ECM for commissions
-function fundContract(uint256 amount) external
+function fundContract(address token, uint256 amount) external onlyOwner
+
+// Emergency token recovery
+function emergencyRecoverTokens(address token, uint256 amount, address to) external onlyOwner
 ```
 
 ### Off-Chain Multi-Level Calculation (Backend)

@@ -444,7 +444,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             pool.totalRewardsAccrued;
         if (remainingRewards == 0) revert InsufficientRewardsForRate();
 
-        uint256 rewardRatePerSecond = (remainingRewards * 1e18) / (pool.maxDuration * 1e18);
+        // Calculate reward rate: raw tokens per second (NOT pre-scaled)
+        // This will be scaled later in accRewardPerShare calculation
+        uint256 rewardRatePerSecond = remainingRewards / pool.maxDuration;
         if (rewardRatePerSecond == 0) revert InvalidRewardRate();
         pool.rewardRatePerSecond = rewardRatePerSecond;
 
@@ -1331,7 +1333,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             if (currentTime > pool.lastRewardTime) {
                 uint256 delta = currentTime - pool.lastRewardTime;
                 uint256 rewardAccrued = _calculateRewardAccruedView(pool, delta);
-                accRewardPerShare += (rewardAccrued * PRECISION * 1e18) / (pool.totalStaked * 1e18);
+                // Single PRECISION scaling - consistent with _updatePoolRewards
+                accRewardPerShare += (rewardAccrued * PRECISION) / pool.totalStaked;
             }
         }
 
@@ -1956,9 +1959,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             pool.totalRewardsAccrued += rewardAccrued;
 
             if (pool.totalStaked > 0) {
+                // Single PRECISION scaling for accRewardPerShare
+                // accRewardPerShare represents rewards per token staked, scaled by PRECISION
                 pool.accRewardPerShare +=
-                    (rewardAccrued * PRECISION * 1e18) /
-                    (pool.totalStaked * 1e18);
+                    (rewardAccrued * PRECISION) / pool.totalStaked;
             }
         }
 
@@ -1979,7 +1983,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         } else if (pool.rewardStrategy == RewardStrategy.MONTHLY) {
             rewardAccrued = _calculateMonthlyRewards(pool, delta);
         } else {
-            rewardAccrued = (delta * pool.rewardRatePerSecond * 1e18) / 1e18;
+            // LINEAR: Simple multiplication - rate is already in tokens per second
+            rewardAccrued = delta * pool.rewardRatePerSecond;
         }
     }
 
@@ -2013,8 +2018,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 uint256 monthReward = pool.monthlyRewards[
                     pool.monthlyRewardIndex
                 ];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days; // Rewards per second this month
-                totalRewards += (timeLeftInDelta * rewardRate) / (PRECISION * 1e18);
+                // Calculate reward rate: tokens per second for this month (no pre-scaling)
+                uint256 rewardRate = monthReward / 30 days;
+                totalRewards += timeLeftInDelta * rewardRate;
                 timeProcessed = delta; // Done processing
             } else {
                 // Time crosses into next month
@@ -2022,8 +2028,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 uint256 monthReward = pool.monthlyRewards[
                     pool.monthlyRewardIndex
                 ];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days; // Rewards per second this month
-                totalRewards += (timeInThisMonth * rewardRate) / (PRECISION * 1e18);
+                // Calculate reward rate: tokens per second for this month (no pre-scaling)
+                uint256 rewardRate = monthReward / 30 days;
+                totalRewards += timeInThisMonth * rewardRate;
 
                 // Advance to next month
                 pool.monthlyRewardIndex++;
@@ -2073,8 +2080,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 : timeLeftInWeek;
 
             uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-            uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS; // Rewards per second this week
-            totalRewards += (timeInThisWeek * rewardRate) / ( PRECISION * 1e18);
+            // Calculate reward rate: tokens per second for this week (no pre-scaling)
+            uint256 rewardRate = weekReward / WEEK_SECONDS;
+            totalRewards += timeInThisWeek * rewardRate;
 
             timeProcessed += timeInThisWeek;
             currentTime += timeInThisWeek;
@@ -2128,8 +2136,9 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 : timeLeftInWeek;
 
             uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-            uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS;
-            totalRewards += (timeInThisWeek * rewardRate) / (PRECISION * 1e18);
+            // Calculate reward rate: tokens per second for this week (no pre-scaling)
+            uint256 rewardRate = weekReward / WEEK_SECONDS;
+            totalRewards += timeInThisWeek * rewardRate;
 
             timeProcessed += timeInThisWeek;
             currentTime += timeInThisWeek;
@@ -2152,7 +2161,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 delta
     ) internal view returns (uint256 rewardAccrued) {
         if (pool.rewardStrategy == RewardStrategy.LINEAR) {
-            rewardAccrued = (delta * pool.rewardRatePerSecond * 1e18) / 1e18;
+            // LINEAR: Simple multiplication - rate is already in tokens per second
+            rewardAccrued = delta * pool.rewardRatePerSecond;
         } else if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
             // WEEKLY strategy - view-only calculation (no state updates)
             rewardAccrued = _calculateWeeklyRewardsView(pool, delta);
@@ -2198,15 +2208,17 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
             if (currentTime + timeLeftInDelta <= monthEndTime) {
                 // All remaining time is within current month
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
-                totalRewards += (timeLeftInDelta * rewardRate) / (PRECISION * 1e18);
+                // Calculate reward rate: tokens per second for this month (no pre-scaling)
+                uint256 rewardRate = monthReward / 30 days;
+                totalRewards += timeLeftInDelta * rewardRate;
                 timeProcessed = delta; // Done processing
             } else {
                 // Time crosses into next month
                 uint256 timeInThisMonth = monthEndTime - currentTime;
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
-                totalRewards += (timeInThisMonth * rewardRate) / (PRECISION * 1e18);
+                // Calculate reward rate: tokens per second for this month (no pre-scaling)
+                uint256 rewardRate = monthReward / 30 days;
+                totalRewards += timeInThisMonth * rewardRate;
 
                 // Advance to next month (LOCAL variable only)
                 currentMonthIndex++;
