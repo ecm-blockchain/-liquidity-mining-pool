@@ -1550,8 +1550,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                     : timeLeftInWeek;
 
                 uint256 weekReward = pool.weeklyRewards[currentWeekIndex];
-                uint256 rewardRate = (weekReward * PRECISION * 1e18) / WEEK_SECONDS;
-                totalPoolRewards += (timeInThisWeek * rewardRate) / (PRECISION * 1e18);
+                uint256 rewardRate = (weekReward * PRECISION ) / WEEK_SECONDS;
+                totalPoolRewards += (timeInThisWeek * rewardRate) / PRECISION;
 
                 timeProcessed += timeInThisWeek;
                 currentTime += timeInThisWeek;
@@ -1597,8 +1597,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
 
                 // Calculate rewards for this time period at this month's rate
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
-                totalPoolRewards += (timeInMonth * rewardRate) / (PRECISION * 1e18);
+                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
+                totalPoolRewards += (timeInMonth * rewardRate) / PRECISION;
 
                 timeProcessed += timeInMonth;
                 ++currentMonthIndex;
@@ -1666,8 +1666,8 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
                 }
 
                 uint256 monthReward = pool.monthlyRewards[currentMonthIndex];
-                uint256 rewardRate = (monthReward * PRECISION * 1e18) / 30 days;
-                totalPoolRewards += (timeInMonth * rewardRate) / (PRECISION * 1e18);
+                uint256 rewardRate = (monthReward * PRECISION) / 30 days;
+                totalPoolRewards += (timeInMonth * rewardRate) / PRECISION;
 
                 timeProcessed += timeInMonth;
                 currentMonthIndex++;
