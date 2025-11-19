@@ -1,0 +1,8 @@
+{
+  "ECM_Testnet_Module#MockUniswapV2Router": "0xd8FB1aCd142E751EBB07A7dF478cC46FC5fD844E",
+  "ECM_Testnet_Module#PoolManager": "0x2437490c52Ed368C863c82886e53Bf24aDB1329e",
+  "ECM_Testnet_Module#ReferralModule": "0x8a034F27D2Ef000603f687CB052f4f700668d2B1",
+  "ECM_Testnet_Module#ReferralVoucher": "0x077E54d75Bf218Cc47b6C8896F9d454b0065a49f",
+  "ECM_Testnet_Module#LiquidityManager": "0xEd85b18cFFD73E3a92C05a8d36be0A1e8e53C84B",
+  "ECM_Testnet_Module#VestingManager": "0xdBe8Af3942bCAEE3651e7BA6E0e06897bb7E2360"
+}

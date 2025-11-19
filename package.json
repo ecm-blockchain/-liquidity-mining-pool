@@ -12,9 +12,12 @@
     "test:logs": "hardhat test --trace",
     "watch": "hardhat watch compilation",
     "flatten": "hardhat flatten contracts/StakingPool.sol > flattened/StakingPool.flattened.sol",
-    "deploy:network": "hardhat ignition deploy ignition/modules/stakingPool.ts --deployment-id ecm-deployment-v1 --network",
-    "deploy:verify": "hardhat ignition deploy ignition/modules/stakingPool.ts --verify --network ",
-    "verify:network": "hardhat ignition verify ecm-deployment-v1 --include-unrelated-contracts --network"
+    "deploy:testnet": "hardhat ignition deploy ignition/modules/deploy-testnet.ts --deployment-id deployment-v1 --network sepolia",
+    "deploy:mainnet": "hardhat ignition deploy ignition/modules/deploy-mainnet.ts --deployment-id deployment-v1 --network mainnet",
+    "deploy:verify": "hardhat ignition deploy ignition/modules/deploy-testnet.ts --verify --network ",
+    "verify:network": "hardhat ignition verify deployment-v1 --include-unrelated-contracts --network",
+    "wire:testnet": "hardhat run scripts/wire-contracts.ts --network sepolia",
+    "wire:mainnet": "hardhat run scripts/wire-contracts.ts --network mainnet"
   },
   "author": "salmanbao <salmancodez@gmail.com>",
   "license": "MIT",

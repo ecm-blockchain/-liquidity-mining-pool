@@ -43,6 +43,7 @@ const config: HardhatUserConfig = {
       verify: {
         etherscan: {
           apiKey: process.env.ETHERSCAN_API_KEY,
+          apiUrl: "https://api.etherscan.io/v2/api?chainid=11155111"
         },
       },
       gasPrice: 2000000000,
@@ -62,6 +63,20 @@ const config: HardhatUserConfig = {
     }
   },
 
+  etherscan: {
+    apiKey: process.env.ETHERSCAN_API_KEY || "",
+    customChains: [
+      {
+        network: "sepolia",
+        chainId: 11155111,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=11155111",
+          browserURL: "https://sepolia.etherscan.io"
+        }
+      }
+    ]
+  },
+
   contractSizer: {
     alphaSort: true,
     disambiguatePaths: false,
@@ -71,7 +86,8 @@ const config: HardhatUserConfig = {
   },
 
   ignition: {
-    requiredConfirmations: 1
+    blockPollingInterval: 10_000,
+    requiredConfirmations: 5
   }
 };
 
