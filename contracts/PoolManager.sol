@@ -530,7 +530,20 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         if (poolId >= poolCount) revert PoolDoesNotExist();
         if (durations.length == 0) revert InvalidDuration();
 
-        pools[poolId].allowedStakeDurations = durations;
+        // Find the maximum duration from the new durations array
+        uint256 maxDur = 0;
+        uint256 durationsLength = durations.length;
+        for (uint256 i = 0; i < durationsLength; ++i) {
+            if (durations[i] > maxDur) {
+                maxDur = durations[i];
+            }
+        }
+        if (maxDur == 0) revert InvalidDuration();
+
+        Pool storage pool = pools[poolId];
+        pool.allowedStakeDurations = durations;
+        pool.maxDuration = maxDur;
+        
         emit AllowedStakeDurationsUpdated(poolId, durations);
     }
 
