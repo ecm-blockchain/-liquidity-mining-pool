@@ -351,7 +351,8 @@
 │  ┌────────────────────────────────────────────────────┐    │
 │  │ DIRECT COMMISSION:                                 │    │
 │  │ • recordPurchaseAndPayDirect() - Process & pay     │    │
-│  │ • withdrawDirectAccrual() - User claims accrued    │    │
+│  │ • withdrawDirectAccrual(token, amount) - Claim     │    │
+│  │   per-token accrued (supports multi-token)         │    │
 │  │ • linkReferrer() - Establish relationship          │    │
 │  │                                                     │    │
 │  │ MULTI-LEVEL COMMISSION:                            │    │
@@ -1100,13 +1101,14 @@
 │  │  Storage:                                                       │    │
 │  │  • mapping(bytes32 => ReferralCode) referralCodes              │    │
 │  │  • mapping(address => address) referrerOf                      │    │
-│  │  • mapping(address => uint256) directAccrued                   │    │
+│  │  • mapping(address => mapping(address => uint256))             │    │
+│  │    directAccrued  // [referrer][token] for multi-token support │    │
 │  │  • mapping(uint256 => ReferralPayoutRoot) payoutRoots          │    │
 │  │  • mapping(uint256 => mapping(address => bool)) claimedInEpoch │    │
 │  │                                                                 │    │
 │  │  Direct Commission Functions:                                  │    │
 │  │  • recordPurchaseAndPayDirect() → instant or accrue            │    │
-│  │  • withdrawDirectAccrual() → user claims accrued               │    │
+│  │  • withdrawDirectAccrual(token, amount) → claim per token      │    │
 │  │                                                                 │    │
 │  │  Multi-Level Commission Functions:                             │    │
 │  │  • recordRewardClaimEvent() → emit for off-chain               │    │
