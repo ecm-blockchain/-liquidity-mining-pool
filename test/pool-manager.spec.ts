@@ -7211,16 +7211,16 @@ describe("PoolManager & VestingManager", function () {
         // Check accrued balance
         const userInfo = await poolManager.getUserInfo(0, buyer1.address);
         const expectedCommission = (userInfo.staked * BigInt(directBps)) / 10000n;
-        const accrued = await referralModule.getDirectAccrual(referrer1.address);
+        const accrued = await referralModule.getDirectAccrual(referrer1.address, ecmToken.target);
         expect(accrued).to.equal(expectedCommission);
 
         // Withdraw accrued amount
         const balanceBefore = await ecmToken.balanceOf(referrer1.address);
-        await referralModule.connect(referrer1).withdrawDirectAccrual(0); // 0 = withdraw all
+        await referralModule.connect(referrer1).withdrawDirectAccrual(ecmToken.target, 0); // 0 = withdraw all
 
         const balanceAfter = await ecmToken.balanceOf(referrer1.address);
         expect(balanceAfter - balanceBefore).to.equal(expectedCommission);
-        expect(await referralModule.getDirectAccrual(referrer1.address)).to.equal(0n);
+        expect(await referralModule.getDirectAccrual(referrer1.address, ecmToken.target)).to.equal(0n);
       });
     });
 

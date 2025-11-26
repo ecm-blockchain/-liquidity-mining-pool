@@ -1452,10 +1452,10 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         }
 
         if (contractBalance >= shouldHave) {
-            availableInContract = contractBalance - shouldHave;
+            availableInContract = contractBalance;
             deficit = 0;
         } else {
-            availableInContract = 0;
+            availableInContract = contractBalance;
             deficit = shouldHave - contractBalance;
         }
     }
@@ -1955,20 +1955,24 @@ contract PoolManager is Ownable, Pausable, ReentrancyGuard {
         uint256 rewardAccrued = _calculateRewardAccrued(pool, delta);
 
         if (rewardAccrued > 0) {
-            // Cap rewardAccrued to remaining rewards to prevent over-promising
+            // CRITICAL: Cap rewardAccrued to remaining rewards to prevent insolvency
+            // This ensures totalRewardsAccrued can NEVER exceed allocatedForRewards
             uint256 remainingRewards = pool.allocatedForRewards -
                 pool.totalRewardsAccrued;
+            
             if (rewardAccrued > remainingRewards) {
                 rewardAccrued = remainingRewards;
                 // Stop future reward accrual when depleted
                 if (pool.rewardStrategy == RewardStrategy.LINEAR) {
                     pool.rewardRatePerSecond = 0;
-                } else {
+                } else if (pool.rewardStrategy == RewardStrategy.MONTHLY) {
                     pool.monthlyRewardIndex = pool.monthlyRewards.length;
+                } else if (pool.rewardStrategy == RewardStrategy.WEEKLY) {
+                    pool.weeklyRewardIndex = pool.weeklyRewards.length;
                 }
             }
 
-            // Track total accrued rewards
+            // Track total accrued rewards - INVARIANT: totalRewardsAccrued <= allocatedForRewards
             pool.totalRewardsAccrued += rewardAccrued;
 
             if (pool.totalStaked > 0) {

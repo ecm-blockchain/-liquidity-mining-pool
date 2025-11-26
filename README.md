@@ -1014,24 +1014,27 @@ function recordPurchaseAndPayDirect(
    - Transfer ECM to referrer immediately
    - Emit `DirectCommissionPaid`
 4. Else:
-   - Accumulate: `directAccrued[referrer] += directAmount`
+   - Accumulate per token: `directAccrued[referrer][token] += directAmount`
    - Emit `DirectCommissionAccrued`
 
 ##### Withdraw Accrued Direct Commissions
 ```solidity
-// User withdraws their own accrued commissions
-function withdrawDirectAccrual(uint256 amount) external nonReentrant
+// User withdraws their own accrued commissions for a specific token
+function withdrawDirectAccrual(address token, uint256 amount) external nonReentrant
 
 // Admin withdraws on behalf of user (emergency or convenience)
-function withdrawDirectAccrualFor(address referrer, uint256 amount, address to) external onlyOwner nonReentrant
+function withdrawDirectAccrualFor(address referrer, address token, uint256 amount, address to) external onlyOwner nonReentrant
 ```
 - **Caller**: Referrer (self-service) or Owner (on behalf of user)
-- **Purpose**: Withdraw accumulated direct commissions
+- **Purpose**: Withdraw accumulated direct commissions for a specific token
+- **Parameters**:
+  - `token`: Token address (ECM or other tokens)
+  - `amount`: Amount to withdraw (0 = withdraw all)
 - **Process**:
-  1. Verify `directAccrued[referrer] >= amount`
-  2. Get stored token address: `token = accruedToken[referrer]`
-  3. Deduct: `directAccrued[referrer] -= amount`
-  4. Transfer token to recipient
+  1. Verify `directAccrued[referrer][token] >= amount`
+  2. Deduct: `directAccrued[referrer][token] -= amount`
+  3. Transfer token to recipient
+- **Note**: Supports multi-token accruals (referrer can earn in different tokens from different pools)
 
 ##### Set Referrer After Purchase (One-Time Only)
 ```solidity

@@ -47,11 +47,11 @@ contract ReferralModule is Ownable, ReentrancyGuard {
     // Buyer → Referrer mapping
     mapping(address => address) public referrerOf;
 
-    // Accrued direct commissions
-    mapping(address => uint256) public directAccrued;
+    // Accrued direct commissions per token per referrer (referrer => token => amount)
+    mapping(address => mapping(address => uint256)) public directAccrued;
 
-    // Token address for accrued commissions (referrer => token)
-    mapping(address => address) public accruedToken;
+    // Legacy: Removed - was mapping(address => address) public accruedToken;
+    // Now using nested mapping above to support multiple tokens
 
     // Merkle roots for reward commission epochs
     mapping(uint256 => ReferralPayoutRoot) public payoutRoots;
@@ -206,8 +206,7 @@ contract ReferralModule is Ownable, ReentrancyGuard {
                 totalDirectPaid += directAmount;
                 emit DirectCommissionPaid(referrer, buyer, poolId, stakedAmount, directAmount, codeHash);
             } else {
-                directAccrued[referrer] += directAmount;
-                accruedToken[referrer] = token; // Store token address for withdrawal
+                directAccrued[referrer][token] += directAmount;
                 emit DirectCommissionAccrued(referrer, buyer, poolId, stakedAmount, directAmount, codeHash);
             }
         }
@@ -412,42 +411,41 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         emit ReferralPayoutClaimed(epochId, msg.sender, token, amount);
     }
 
-    /// @notice Withdraws accrued direct commissions
+    /// @notice Withdraws accrued direct commissions for a specific token
+    /// @param token Token address to withdraw
     /// @param amount Amount to withdraw (0 = withdraw all)
-    function withdrawDirectAccrual(uint256 amount) external nonReentrant {
-        uint256 accrued = directAccrued[msg.sender];
+    function withdrawDirectAccrual(address token, uint256 amount) external nonReentrant {
+        if (token == address(0)) revert InvalidAddress();
+        
+        uint256 accrued = directAccrued[msg.sender][token];
         if (accrued == 0) revert InvalidAmount();
         
         uint256 toWithdraw = amount == 0 ? accrued : amount;
         if (toWithdraw > accrued) revert InvalidAmount();
         
-        // Get stored token address
-        address token = accruedToken[msg.sender];
-        if (token == address(0)) revert InvalidAddress();
-        
-        directAccrued[msg.sender] = accrued - toWithdraw;
+        directAccrued[msg.sender][token] = accrued - toWithdraw;
         IERC20(token).safeTransfer(msg.sender, toWithdraw);
         emit DirectAccrualWithdrawn(msg.sender, toWithdraw, msg.sender);
     }
 
     /// @notice Admin withdraws accrued direct commission on behalf of user
     /// @param referrer Referrer address
+    /// @param token Token address to withdraw
     /// @param amount Amount to withdraw
     /// @param to Recipient address
     function withdrawDirectAccrualFor(
         address referrer,
+        address token,
         uint256 amount,
         address to
     ) external onlyOwner nonReentrant {
-        uint256 accrued = directAccrued[referrer];
+        if (token == address(0)) revert InvalidAddress();
+        
+        uint256 accrued = directAccrued[referrer][token];
         if (accrued == 0 || amount > accrued) revert InvalidAmount();
         if (to == address(0)) revert InvalidAddress();
         
-        // Get stored token address
-        address token = accruedToken[referrer];
-        if (token == address(0)) revert InvalidAddress();
-        
-        directAccrued[referrer] = accrued - amount;
+        directAccrued[referrer][token] = accrued - amount;
         IERC20(token).safeTransfer(to, amount);
         emit DirectAccrualWithdrawn(referrer, amount, to);
     }
@@ -506,13 +504,15 @@ contract ReferralModule is Ownable, ReentrancyGuard {
         return claimedInEpoch[epochId][user];
     }
 
-    /// @notice Gets direct accrual balance for a referrer
+    /// @notice Gets direct accrual balance for a referrer for a specific token
     /// @param referrer Referrer address
+    /// @param token Token address
     /// @return Accrued amount
     function getDirectAccrual(
-        address referrer
+        address referrer,
+        address token
     ) external view returns (uint256) {
-        return directAccrued[referrer];
+        return directAccrued[referrer][token];
     }
 
     /// @notice Calculates expected direct commission for a staked amount
